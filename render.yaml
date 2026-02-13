@@ -1,0 +1,24 @@
+databases:
+  - name: colorado-wells-db
+    plan: starter  # $7/mo — 1 GB storage, 256 MB RAM
+    databaseName: wells_db
+    user: wells_admin
+    region: oregon  # us-west
+
+services:
+  - type: web
+    name: colorado-wells-api
+    runtime: python
+    plan: starter  # $7/mo
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: colorado-wells-db
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: "3.11"
+    healthCheckPath: /
+    autoDeploy: true
