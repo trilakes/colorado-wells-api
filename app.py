@@ -7,8 +7,8 @@ import os
 import math
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import psycopg
-from psycopg.rows import dict_row
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 CORS(app, origins=[
@@ -23,7 +23,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '')
 
 def get_db():
     """Get a database connection."""
-    conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 

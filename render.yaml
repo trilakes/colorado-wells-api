@@ -4,11 +4,10 @@
 services:
   - type: web
     name: colorado-wells-api
-    runtime: python
+    runtime: docker
     plan: starter  # $7/mo
     region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
