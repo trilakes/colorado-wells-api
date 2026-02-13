@@ -5,6 +5,7 @@ Replaces live DWR API calls with own database.
 """
 import os
 import math
+import requests as http_requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import psycopg2
@@ -19,6 +20,8 @@ CORS(app, origins=[
 ])
 
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
+OWNER_EMAILS = ['kyle@trilakes.co']
 
 
 def get_db():
@@ -311,6 +314,81 @@ def wells_counties():
         conn.close()
 
 
+# ─── Stripe Email Verification ───────────────────────────────────────────────
+
+@app.route('/api/verify', methods=['POST'])
+def verify_email():
+    """Verify Stripe subscription/payment by email. Replaces Cloudflare Worker."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+
+    if not email:
+        return jsonify({"valid": False, "message": "Email required"}), 400
+
+    # Owner bypass
+    if email in OWNER_EMAILS:
+        return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
+
+    if not STRIPE_SECRET_KEY:
+        return jsonify({"valid": False, "message": "Payment verification unavailable"}), 503
+
+    headers = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
+
+    try:
+        # Find customer by email
+        r = http_requests.get(
+            f"https://api.stripe.com/v1/customers?email={email}&limit=1",
+            headers=headers, timeout=10
+        )
+        customers = r.json()
+        if not customers.get('data'):
+            return jsonify({"valid": False, "message": "No account found for this email"})
+
+        customer_id = customers['data'][0]['id']
+
+        # 1) Check active subscription (monthly)
+        r = http_requests.get(
+            f"https://api.stripe.com/v1/subscriptions?customer={customer_id}&status=active&limit=1",
+            headers=headers, timeout=10
+        )
+        subs = r.json()
+        if subs.get('data'):
+            return jsonify({
+                "valid": True,
+                "type": "monthly",
+                "message": "Active subscription found",
+                "expiresAt": subs['data'][0].get('current_period_end', 0) * 1000
+            })
+
+        # 2) Check checkout sessions for one-time payment (lifetime)
+        r = http_requests.get(
+            f"https://api.stripe.com/v1/checkout/sessions?customer={customer_id}&limit=20",
+            headers=headers, timeout=10
+        )
+        sessions = r.json()
+        has_lifetime = any(
+            s.get('payment_status') == 'paid' and s.get('mode') == 'payment'
+            for s in sessions.get('data', [])
+        )
+        if has_lifetime:
+            return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
+
+        # 3) Fallback — check payment_intents
+        r = http_requests.get(
+            f"https://api.stripe.com/v1/payment_intents?customer={customer_id}&limit=10",
+            headers=headers, timeout=10
+        )
+        payments = r.json()
+        has_payment = any(p.get('status') == 'succeeded' for p in payments.get('data', []))
+        if has_payment:
+            return jsonify({"valid": True, "type": "lifetime", "message": "Payment verified"})
+
+        return jsonify({"valid": False, "message": "No active subscription found"})
+
+    except Exception:
+        return jsonify({"valid": False, "message": "Verification error"}), 500
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -324,7 +402,8 @@ def home():
             "GET /api/wells/search?q=&county=&division=",
             "GET /api/wells/<receipt>",
             "GET /api/wells/stats",
-            "GET /api/wells/counties"
+            "GET /api/wells/counties",
+            "POST /api/verify {email}"
         ]
     })
 
