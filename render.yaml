@@ -1,9 +1,5 @@
-databases:
-  - name: colorado-wells-db
-    plan: starter  # $7/mo — 1 GB storage, 256 MB RAM
-    databaseName: wells_db
-    user: wells_admin
-    region: oregon  # us-west
+# Database already exists: wells_db_yxxi on Render PostgreSQL
+# Set DATABASE_URL env var manually in Render dashboard
 
 services:
   - type: web
@@ -14,10 +10,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
-      - key: DATABASE_URL
-        fromDatabase:
-          name: colorado-wells-db
-          property: connectionString
       - key: PYTHON_VERSION
         value: "3.11"
     healthCheckPath: /
