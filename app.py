@@ -318,7 +318,13 @@ def wells_counties():
 
 @app.route('/api/verify', methods=['POST'])
 def verify_email():
-    """Verify Stripe subscription/payment by email. Replaces Cloudflare Worker."""
+    """Verify Stripe subscription/payment by email.
+    
+    Checks in order:
+    1. Customer-based: subscriptions, checkout sessions, payment intents
+    2. Email-based fallback: scans checkout sessions from known Payment Links
+       (handles payments made before customer_creation=always was enabled)
+    """
     data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip().lower()
 
@@ -335,55 +341,95 @@ def verify_email():
     headers = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
 
     try:
-        # Find customer by email
+        # ── Step 1: Customer-based lookup ──
         r = http_requests.get(
             f"https://api.stripe.com/v1/customers?email={email}&limit=1",
             headers=headers, timeout=10
         )
         customers = r.json()
-        if not customers.get('data'):
-            return jsonify({"valid": False, "message": "No account found for this email"})
+        customer_id = customers['data'][0]['id'] if customers.get('data') else None
 
-        customer_id = customers['data'][0]['id']
+        if customer_id:
+            # 1a) Check active subscription (monthly)
+            r = http_requests.get(
+                f"https://api.stripe.com/v1/subscriptions?customer={customer_id}&status=active&limit=1",
+                headers=headers, timeout=10
+            )
+            subs = r.json()
+            if subs.get('data'):
+                return jsonify({
+                    "valid": True,
+                    "type": "monthly",
+                    "message": "Active subscription found",
+                    "expiresAt": subs['data'][0].get('current_period_end', 0) * 1000
+                })
 
-        # 1) Check active subscription (monthly)
-        r = http_requests.get(
-            f"https://api.stripe.com/v1/subscriptions?customer={customer_id}&status=active&limit=1",
-            headers=headers, timeout=10
-        )
-        subs = r.json()
-        if subs.get('data'):
-            return jsonify({
-                "valid": True,
-                "type": "monthly",
-                "message": "Active subscription found",
-                "expiresAt": subs['data'][0].get('current_period_end', 0) * 1000
-            })
+            # 1b) Check checkout sessions for one-time payment (lifetime)
+            r = http_requests.get(
+                f"https://api.stripe.com/v1/checkout/sessions?customer={customer_id}&limit=20",
+                headers=headers, timeout=10
+            )
+            sessions = r.json()
+            has_lifetime = any(
+                s.get('payment_status') == 'paid' and s.get('mode') == 'payment'
+                for s in sessions.get('data', [])
+            )
+            if has_lifetime:
+                return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
 
-        # 2) Check checkout sessions for one-time payment (lifetime)
-        r = http_requests.get(
-            f"https://api.stripe.com/v1/checkout/sessions?customer={customer_id}&limit=20",
-            headers=headers, timeout=10
-        )
-        sessions = r.json()
-        has_lifetime = any(
-            s.get('payment_status') == 'paid' and s.get('mode') == 'payment'
-            for s in sessions.get('data', [])
-        )
-        if has_lifetime:
-            return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
+            # 1c) Fallback — check payment_intents
+            r = http_requests.get(
+                f"https://api.stripe.com/v1/payment_intents?customer={customer_id}&limit=10",
+                headers=headers, timeout=10
+            )
+            payments = r.json()
+            has_payment = any(p.get('status') == 'succeeded' for p in payments.get('data', []))
+            if has_payment:
+                return jsonify({"valid": True, "type": "lifetime", "message": "Payment verified"})
 
-        # 3) Fallback — check payment_intents
-        r = http_requests.get(
-            f"https://api.stripe.com/v1/payment_intents?customer={customer_id}&limit=10",
-            headers=headers, timeout=10
-        )
-        payments = r.json()
-        has_payment = any(p.get('status') == 'succeeded' for p in payments.get('data', []))
-        if has_payment:
-            return jsonify({"valid": True, "type": "lifetime", "message": "Payment verified"})
+        # ── Step 2: Email-based fallback (no customer or customer had no payments) ──
+        # Scan checkout sessions from all known Payment Links and match by email.
+        # This catches payments made before customer_creation was set to "always".
+        PAYMENT_LINKS = os.environ.get('PAYMENT_LINK_IDS', '').split(',')
+        if not PAYMENT_LINKS or PAYMENT_LINKS == ['']:
+            # Hardcoded fallback — all Colorado Well Finder payment links ever used
+            PAYMENT_LINKS = [
+                'plink_1T0XVOFiHBHcGzRNQXGAkacg',  # Lifetime $47 (active)
+                'plink_1T0XVTFiHBHcGzRNkd9H0TWL',  # Monthly $19 (active)
+                'plink_1T0T2KFiHBHcGzRNUJfF6mTD',
+                'plink_1T0SuoFiHBHcGzRNUcVpycOk',
+                'plink_1T0SuoFiHBHcGzRN9NwMrpqm',
+                'plink_1T0Rm2FiHBHcGzRNMDlLGOxZ',
+                'plink_1T0RlwFiHBHcGzRNfHxd5vlh',
+                'plink_1T0O6zFiHBHcGzRNs0fLtb2q',
+                'plink_1T0O6sFiHBHcGzRNYinOZNvg',
+                'plink_1T0O2WFiHBHcGzRNnCDNowrR',
+                'plink_1SjAS0FiHBHcGzRNSfmm24E1',
+            ]
 
-        return jsonify({"valid": False, "message": "No active subscription found"})
+        for plink_id in PAYMENT_LINKS:
+            plink_id = plink_id.strip()
+            if not plink_id:
+                continue
+            try:
+                r = http_requests.get(
+                    f"https://api.stripe.com/v1/checkout/sessions?payment_link={plink_id}&limit=100",
+                    headers=headers, timeout=15
+                )
+                sessions = r.json()
+                for s in sessions.get('data', []):
+                    cd = s.get('customer_details') or {}
+                    if cd.get('email', '').lower() == email and s.get('payment_status') == 'paid':
+                        access_type = 'monthly' if s.get('mode') == 'subscription' else 'lifetime'
+                        return jsonify({
+                            "valid": True,
+                            "type": access_type,
+                            "message": f"{access_type.title()} access verified (payment found)"
+                        })
+            except Exception:
+                continue  # Skip this payment link if API call fails
+
+        return jsonify({"valid": False, "message": "No active subscription found for this email"})
 
     except Exception:
         return jsonify({"valid": False, "message": "Verification error"}), 500
