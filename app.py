@@ -1,7 +1,7 @@
 """
-Colorado Well Finder - Wells API
-Serves 591K+ Colorado wells from PostgreSQL on Render.
-Replaces live DWR API calls with own database.
+"""Well Finder - Multi-State Wells API
+Serves 1.1M+ wells (CO, AZ, NM) from PostgreSQL on Render.
+Supports ?state=CO|AZ|NM filtering on all endpoints.
 """
 import os
 import math
@@ -22,12 +22,24 @@ CORS(app, origins=[
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
 OWNER_EMAILS = ['kyle@trilakes.co']
+VALID_STATES = {'CO', 'AZ', 'NM'}
 
 
 def get_db():
     """Get a database connection."""
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
+
+
+def parse_state_filter():
+    """Parse ?state= parameter. Returns (condition_sql, params) or (None, [])."""
+    state = request.args.get('state', '').strip().upper()
+    if state:
+        states = [s.strip() for s in state.split(',') if s.strip() in VALID_STATES]
+        if states:
+            placeholders = ','.join(['%s'] * len(states))
+            return f"well_state IN ({placeholders})", states
+    return None, []
 
 
 # ─── Explore Map: Bounding Box Query ────────────────────────────────────────
@@ -40,6 +52,7 @@ def wells_bbox():
 
     Query params:
       minLat, maxLat, minLng, maxLng  (required)
+      state  (optional — CO, AZ, NM or comma-separated)
       limit  (optional, default 10000, max 50000)
     """
     try:
@@ -57,18 +70,21 @@ def wells_bbox():
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("""
+        state_cond, state_params = parse_state_filter()
+        extra_where = f"AND {state_cond}" if state_cond else ""
+        cur.execute(f"""
             SELECT receipt, permit, latitude, longitude, depth_total,
                    status, county, uses, pump_yield_gpm, static_water_level,
                    aquifers, driller_name, date_completed, address, city,
-                   owner_name, category, elevation
+                   owner_name, category, elevation, well_state
             FROM wells
             WHERE latitude BETWEEN %s AND %s
               AND longitude BETWEEN %s AND %s
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
+              {extra_where}
             LIMIT %s
-        """, (min_lat, max_lat, min_lng, max_lng, limit))
+        """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
         rows = cur.fetchall()
         return jsonify({
             "wells": rows,
@@ -89,6 +105,7 @@ def wells_clusters():
 
     Query params:
       minLat, maxLat, minLng, maxLng  (required)
+      state  (optional — CO, AZ, NM or comma-separated)
       gridSize  (optional, default 20 — number of cells per axis)
     """
     try:
@@ -109,7 +126,9 @@ def wells_clusters():
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("""
+        state_cond, state_params = parse_state_filter()
+        extra_where = f"AND {state_cond}" if state_cond else ""
+        cur.execute(f"""
             SELECT
                 FLOOR((latitude - %s) / %s) AS lat_bin,
                 FLOOR((longitude - %s) / %s) AS lng_bin,
@@ -120,9 +139,10 @@ def wells_clusters():
               AND longitude BETWEEN %s AND %s
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
+              {extra_where}
             GROUP BY lat_bin, lng_bin
         """, (min_lat, lat_step, min_lng, lng_step,
-              min_lat, max_lat, min_lng, max_lng))
+              min_lat, max_lat, min_lng, max_lng, *state_params))
 
         clusters = []
         for row in cur.fetchall():
@@ -148,7 +168,12 @@ def well_detail(receipt):
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM wells WHERE receipt = %s LIMIT 1", (receipt,))
+        state_cond, state_params = parse_state_filter()
+        if state_cond:
+            cur.execute(f"SELECT * FROM wells WHERE receipt = %s AND {state_cond} LIMIT 1",
+                        (receipt, *state_params))
+        else:
+            cur.execute("SELECT * FROM wells WHERE receipt = %s LIMIT 1", (receipt,))
         row = cur.fetchone()
         if not row:
             return jsonify({"error": "Well not found"}), 404
@@ -170,6 +195,7 @@ def wells_search():
       division  - water division number
       uses      - well use type
       status    - well status
+      state     - CO, AZ, NM or comma-separated
       minDepth  - minimum total depth
       maxDepth  - maximum total depth
       page      - page number (default 1)
@@ -220,6 +246,11 @@ def wells_search():
         conditions.append("depth_total <= %s")
         params.append(float(max_depth))
 
+    state_cond, state_params = parse_state_filter()
+    if state_cond:
+        conditions.append(state_cond)
+        params.extend(state_params)
+
     where = " AND ".join(conditions) if conditions else "TRUE"
 
     conn = get_db()
@@ -236,7 +267,8 @@ def wells_search():
             SELECT receipt, permit, status, category, latitude, longitude,
                    county, division, depth_total, pump_yield_gpm,
                    static_water_level, uses, owner_name, city, state, zip_code,
-                   aquifers, date_permit_issued, date_completed, more_info_url
+                   aquifers, date_permit_issued, date_completed, more_info_url,
+                   well_state
             FROM wells
             WHERE {where}
             ORDER BY receipt
@@ -260,11 +292,15 @@ def wells_search():
 
 @app.route('/api/wells/stats')
 def wells_stats():
-    """Get aggregate statistics about the wells database."""
+    """Get aggregate statistics about the wells database. Supports ?state= filter."""
+    state_cond, state_params = parse_state_filter()
+    extra_where = f"WHERE {state_cond}" if state_cond else ""
+    county_extra = f"AND {state_cond}" if state_cond else ""
+
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(f"""
             SELECT
                 COUNT(*) AS total_wells,
                 COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS geocoded_wells,
@@ -273,20 +309,26 @@ def wells_stats():
                 MAX(depth_total) AS max_depth,
                 COUNT(DISTINCT county) AS counties
             FROM wells
-        """)
+            {extra_where}
+        """, state_params)
         stats = dict(cur.fetchone())
         stats['avg_depth'] = round(float(stats['avg_depth']), 1) if stats['avg_depth'] else None
         stats['max_depth'] = float(stats['max_depth']) if stats['max_depth'] else None
 
+        # State breakdown
+        cur.execute("SELECT well_state, COUNT(*) AS count FROM wells GROUP BY well_state ORDER BY well_state")
+        stats['states'] = [dict(r) for r in cur.fetchall()]
+
         # County breakdown
-        cur.execute("""
+        cur.execute(f"""
             SELECT county, COUNT(*) AS count
             FROM wells
             WHERE county IS NOT NULL
+            {county_extra}
             GROUP BY county
             ORDER BY count DESC
             LIMIT 20
-        """)
+        """, state_params)
         stats['top_counties'] = [dict(r) for r in cur.fetchall()]
 
         return jsonify(stats)
@@ -298,17 +340,21 @@ def wells_stats():
 
 @app.route('/api/wells/counties')
 def wells_counties():
-    """Get list of all counties with well counts."""
+    """Get list of all counties with well counts. Supports ?state= filter."""
+    state_cond, state_params = parse_state_filter()
+    extra_where = f"AND {state_cond}" if state_cond else ""
+
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(f"""
             SELECT county, COUNT(*) AS count
             FROM wells
             WHERE county IS NOT NULL
+            {extra_where}
             GROUP BY county
             ORDER BY county
-        """)
+        """, state_params)
         return jsonify([dict(r) for r in cur.fetchall()])
     finally:
         conn.close()
@@ -441,16 +487,19 @@ def verify_email():
 def home():
     return jsonify({
         "status": "ok",
-        "service": "Colorado Well Finder - Wells API",
+        "service": "Well Finder - Multi-State Wells API",
+        "states": ["CO", "AZ", "NM"],
+        "wells": "1.1M+",
         "endpoints": [
-            "GET /api/wells/bbox?minLat=&maxLat=&minLng=&maxLng=",
-            "GET /api/wells/clusters?minLat=&maxLat=&minLng=&maxLng=",
-            "GET /api/wells/search?q=&county=&division=",
+            "GET /api/wells/bbox?minLat=&maxLat=&minLng=&maxLng=&state=CO",
+            "GET /api/wells/clusters?minLat=&maxLat=&minLng=&maxLng=&state=AZ",
+            "GET /api/wells/search?q=&county=&state=CO,AZ,NM",
             "GET /api/wells/<receipt>",
-            "GET /api/wells/stats",
-            "GET /api/wells/counties",
+            "GET /api/wells/stats?state=NM",
+            "GET /api/wells/counties?state=CO",
             "POST /api/verify {email}"
-        ]
+        ],
+        "note": "All endpoints accept ?state=CO|AZ|NM (comma-separated for multiple). Omit for all states."
     })
 
 
