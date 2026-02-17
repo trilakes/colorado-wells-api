@@ -1,5 +1,5 @@
 """
-"""Well Finder - Multi-State Wells API
+Well Finder - Multi-State Wells API
 Serves 1.1M+ wells (CO, AZ, NM) from PostgreSQL on Render.
 Supports ?state=CO|AZ|NM filtering on all endpoints.
 """
