@@ -1,7 +1,8 @@
 """
-Well Finder - Multi-State Wells API
-Serves 1.1M+ wells (CO, AZ, NM) from PostgreSQL on Render.
-Supports ?state=CO|AZ|NM filtering on all endpoints.
+Well Finder - Multi-State Wells & Environmental Data API
+Serves 1.3M+ wells (CO, AZ, NM, WY) plus 1.5M+ overlay features
+(contamination, oil/gas, dams, gauges, springs, water rights, aquifers)
+from PostgreSQL on Render.
 """
 import os
 import math
@@ -22,7 +23,66 @@ CORS(app, origins=[
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
 OWNER_EMAILS = ['kyle@trilakes.co']
-VALID_STATES = {'CO', 'AZ', 'NM'}
+VALID_STATES = {'CO', 'AZ', 'NM', 'WY'}
+
+# ─── Overlay Layer Definitions ───────────────────────────────────────────────
+
+OVERLAY_LAYERS = {
+    'contamination': {
+        'table': 'epa_sites',
+        'label': 'EPA Contamination Sites',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'site_id, site_name, latitude, longitude, state, county, category, npl_status, superfund, site_url',
+    },
+    'superfund': {
+        'table': 'superfund_sites',
+        'label': 'Superfund Sites',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'epa_id, site_name, latitude, longitude, state, county, npl_status, site_url',
+    },
+    'oilgas': {
+        'table': 'oil_gas_wells',
+        'label': 'Oil & Gas Wells',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'api_number, well_name, operator, latitude, longitude, state, county, well_type, well_status, depth',
+    },
+    'gauges': {
+        'table': 'stream_gauges',
+        'label': 'USGS Stream Gauges',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'station_id, name, latitude, longitude, state, stage_ft, flow_cfs, status, url',
+    },
+    'dams': {
+        'table': 'dams',
+        'label': 'Dams & Reservoirs',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'dam_id, dam_name, latitude, longitude, state, county, river, dam_height_ft, max_storage_acre_ft, primary_purpose, hazard_potential, year_completed',
+    },
+    'springs': {
+        'table': 'springs',
+        'label': 'Springs',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'site_id, name, latitude, longitude, state, county, source',
+    },
+    'waterrights': {
+        'table': 'water_rights',
+        'label': 'Water Rights',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'record_number, latitude, longitude, basin, status, use_type, total_diversion, url',
+    },
+    'groundwater': {
+        'table': 'groundwater_sites',
+        'label': 'Groundwater Monitoring',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'site_id, latitude, longitude, well_type, water_use, well_depth, water_level_depth, county, basin',
+    },
+    'aquifers': {
+        'table': 'aquifer_boundaries',
+        'label': 'Aquifer Boundaries',
+        'lat': 'center_lat', 'lng': 'center_lng',
+        'bbox_cols': 'aquifer_name, aquifer_code, rock_name, rock_type, min_lat, max_lat, min_lng, max_lng, center_lat, center_lng',
+    },
+}
 
 
 def get_db():
@@ -481,25 +541,265 @@ def verify_email():
         return jsonify({"valid": False, "message": "Verification error"}), 500
 
 
+# ─── Overlay: Bounding Box Query ─────────────────────────────────────────────
+
+@app.route('/api/overlay/<layer>/bbox')
+def overlay_bbox(layer):
+    """
+    Get overlay features within a bounding box.
+
+    Layers: contamination, superfund, oilgas, gauges, dams, springs,
+            waterrights, groundwater, aquifers
+
+    Query params:
+      minLat, maxLat, minLng, maxLng  (required)
+      limit  (optional, default 5000, max 20000)
+    """
+    if layer not in OVERLAY_LAYERS:
+        return jsonify({
+            "error": f"Unknown layer: {layer}",
+            "available": list(OVERLAY_LAYERS.keys())
+        }), 400
+
+    config = OVERLAY_LAYERS[layer]
+
+    try:
+        min_lat = float(request.args.get('minLat', 0))
+        max_lat = float(request.args.get('maxLat', 0))
+        min_lng = float(request.args.get('minLng', 0))
+        max_lng = float(request.args.get('maxLng', 0))
+        limit = min(int(request.args.get('limit', 5000)), 20000)
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": f"Invalid parameters: {e}"}), 400
+
+    if min_lat == 0 and max_lat == 0:
+        return jsonify({"error": "Bounding box required"}), 400
+
+    lat_col = config['lat']
+    lng_col = config['lng']
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT {config['bbox_cols']}
+            FROM {config['table']}
+            WHERE {lat_col} BETWEEN %s AND %s
+              AND {lng_col} BETWEEN %s AND %s
+              AND {lat_col} IS NOT NULL
+              AND {lng_col} IS NOT NULL
+            LIMIT %s
+        """, (min_lat, max_lat, min_lng, max_lng, limit))
+
+        rows = cur.fetchall()
+        return jsonify({
+            "layer": layer,
+            "label": config['label'],
+            "features": [dict(r) for r in rows],
+            "count": len(rows),
+            "truncated": len(rows) >= limit
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+
+# ─── Overlay: Feature Detail ────────────────────────────────────────────────
+
+@app.route('/api/overlay/<layer>/<feature_id>')
+def overlay_detail(layer, feature_id):
+    """Get full details for a single overlay feature."""
+    if layer not in OVERLAY_LAYERS:
+        return jsonify({"error": f"Unknown layer: {layer}"}), 400
+
+    config = OVERLAY_LAYERS[layer]
+    # Determine the ID column based on layer
+    id_cols = {
+        'contamination': 'site_id', 'superfund': 'epa_id',
+        'oilgas': 'api_number', 'gauges': 'station_id',
+        'dams': 'dam_id', 'springs': 'site_id',
+        'waterrights': 'record_number', 'groundwater': 'site_id',
+        'aquifers': 'aquifer_code',
+    }
+    id_col = id_cols.get(layer, 'id')
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM {config['table']} WHERE {id_col} = %s LIMIT 1",
+                    (feature_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Feature not found"}), 404
+        return jsonify(dict(row))
+    finally:
+        conn.close()
+
+
+# ─── Overlay: Statistics ─────────────────────────────────────────────────────
+
+@app.route('/api/overlay/stats')
+def overlay_stats():
+    """Get total feature counts for all overlay layers and wells."""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        layers = {}
+        for key, config in OVERLAY_LAYERS.items():
+            try:
+                cur.execute(f"SELECT COUNT(*) AS count FROM {config['table']}")
+                layers[key] = {
+                    "label": config['label'],
+                    "count": cur.fetchone()['count']
+                }
+            except Exception:
+                layers[key] = {"label": config['label'], "count": 0}
+                conn.rollback()
+
+        # Wells breakdown
+        cur.execute("SELECT well_state, COUNT(*) AS count FROM wells GROUP BY well_state ORDER BY well_state")
+        wells_by_state = {r['well_state']: r['count'] for r in cur.fetchall()}
+
+        return jsonify({
+            "wells": wells_by_state,
+            "wells_total": sum(wells_by_state.values()),
+            "overlay_layers": layers,
+            "overlay_total": sum(s['count'] for s in layers.values()),
+        })
+    finally:
+        conn.close()
+
+
+# ─── Nearby: Proximity Query Across All Layers ──────────────────────────────
+
+@app.route('/api/nearby')
+def nearby_features():
+    """
+    Get nearby features from all layers within a radius of a point.
+
+    Query params:
+      lat, lng     (required — center point)
+      radius       (optional, miles, default 5)
+      layers       (optional, comma-separated layer names, default all)
+      limit        (optional, per-layer limit, default 10, max 50)
+    """
+    try:
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "lat and lng required"}), 400
+
+    radius_miles = float(request.args.get('radius', 5))
+    per_limit = min(int(request.args.get('limit', 10)), 50)
+
+    # Convert miles to approximate degrees
+    lat_range = radius_miles / 69.0
+    lng_range = radius_miles / (69.0 * max(math.cos(math.radians(lat)), 0.01))
+
+    min_lat = lat - lat_range
+    max_lat = lat + lat_range
+    min_lng = lng - lng_range
+    max_lng = lng + lng_range
+
+    requested = request.args.get('layers', '').strip()
+    if requested:
+        target_layers = [l.strip() for l in requested.split(',') if l.strip() in OVERLAY_LAYERS]
+    else:
+        target_layers = list(OVERLAY_LAYERS.keys())
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        results = {}
+
+        for key in target_layers:
+            config = OVERLAY_LAYERS[key]
+            lat_col = config['lat']
+            lng_col = config['lng']
+
+            try:
+                cur.execute(f"""
+                    SELECT {config['bbox_cols']},
+                           SQRT(POW(({lat_col} - %s) * 69.0, 2) +
+                                POW(({lng_col} - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                           ) AS distance_miles
+                    FROM {config['table']}
+                    WHERE {lat_col} BETWEEN %s AND %s
+                      AND {lng_col} BETWEEN %s AND %s
+                      AND {lat_col} IS NOT NULL
+                    ORDER BY distance_miles
+                    LIMIT %s
+                """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng, per_limit))
+
+                features = cur.fetchall()
+                results[key] = {
+                    "label": config['label'],
+                    "count": len(features),
+                    "nearest": [dict(f) for f in features],
+                }
+            except Exception as e:
+                results[key] = {"label": config['label'], "count": 0, "error": str(e)}
+                conn.rollback()
+
+        # Also include nearest wells
+        try:
+            cur.execute("""
+                SELECT receipt, latitude, longitude, depth_total, county, well_state,
+                       owner_name, uses, status,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM wells
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                  AND latitude IS NOT NULL
+                ORDER BY distance_miles
+                LIMIT %s
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng, per_limit))
+
+            wells = cur.fetchall()
+            results['wells'] = {
+                "label": "Water Wells",
+                "count": len(wells),
+                "nearest": [dict(w) for w in wells],
+            }
+        except Exception as e:
+            results['wells'] = {"label": "Water Wells", "count": 0, "error": str(e)}
+
+        return jsonify({
+            "center": {"lat": lat, "lng": lng},
+            "radius_miles": radius_miles,
+            "layers": results,
+        })
+    finally:
+        conn.close()
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.route('/')
 def home():
     return jsonify({
         "status": "ok",
-        "service": "Well Finder - Multi-State Wells API",
-        "states": ["CO", "AZ", "NM"],
-        "wells": "1.1M+",
+        "service": "Well Finder - Multi-State Wells & Environmental Data API",
+        "states": ["CO", "AZ", "NM", "WY"],
+        "wells": "1.3M+",
+        "overlay_layers": list(OVERLAY_LAYERS.keys()),
         "endpoints": [
             "GET /api/wells/bbox?minLat=&maxLat=&minLng=&maxLng=&state=CO",
-            "GET /api/wells/clusters?minLat=&maxLat=&minLng=&maxLng=&state=AZ",
-            "GET /api/wells/search?q=&county=&state=CO,AZ,NM",
+            "GET /api/wells/clusters?minLat=&maxLat=&minLng=&maxLng=",
+            "GET /api/wells/search?q=&county=&state=CO,AZ,NM,WY",
             "GET /api/wells/<receipt>",
             "GET /api/wells/stats?state=NM",
             "GET /api/wells/counties?state=CO",
+            "GET /api/overlay/<layer>/bbox?minLat=&maxLat=&minLng=&maxLng=",
+            "GET /api/overlay/<layer>/<id>",
+            "GET /api/overlay/stats",
+            "GET /api/nearby?lat=&lng=&radius=5&layers=contamination,dams",
             "POST /api/verify {email}"
         ],
-        "note": "All endpoints accept ?state=CO|AZ|NM (comma-separated for multiple). Omit for all states."
+        "overlay_info": {k: v['label'] for k, v in OVERLAY_LAYERS.items()},
     })
 
 
