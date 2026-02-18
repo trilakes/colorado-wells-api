@@ -6,8 +6,10 @@ from PostgreSQL on Render.
 """
 import os
 import math
+import io
+from datetime import datetime, timezone
 import requests as http_requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -461,6 +463,8 @@ def verify_email():
     1. Customer-based: subscriptions, checkout sessions, payment intents
     2. Email-based fallback: scans checkout sessions from known Payment Links
        (handles payments made before customer_creation=always was enabled)
+    
+    Returns tier info for the new report model.
     """
     data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip().lower()
@@ -470,7 +474,8 @@ def verify_email():
 
     # Owner bypass
     if email in OWNER_EMAILS:
-        return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
+        return jsonify({"valid": True, "type": "unlimited", "tier": "unlimited",
+                        "reports_remaining": 999999, "message": "Unlimited access verified"})
 
     if not STRIPE_SECRET_KEY:
         return jsonify({"valid": False, "message": "Payment verification unavailable"}), 503
@@ -487,7 +492,24 @@ def verify_email():
         customer_id = customers['data'][0]['id'] if customers.get('data') else None
 
         if customer_id:
-            # 1a) Check active subscription (monthly)
+            cust = customers['data'][0]
+            meta = cust.get('metadata', {})
+
+            # Check if tier is already set on customer
+            if meta.get('report_tier'):
+                tier = meta['report_tier']
+                used = int(meta.get('reports_used', '0'))
+                limit = TIER_REPORT_LIMITS.get(tier, 0)
+                return jsonify({
+                    "valid": True,
+                    "type": tier,
+                    "tier": tier,
+                    "reports_used": used,
+                    "reports_remaining": max(0, limit - used),
+                    "message": f"{tier.title()} access verified"
+                })
+
+            # 1a) Check active subscription (legacy monthly → treat as unlimited)
             r = http_requests.get(
                 f"https://api.stripe.com/v1/subscriptions?customer={customer_id}&status=active&limit=1",
                 headers=headers, timeout=10
@@ -496,23 +518,52 @@ def verify_email():
             if subs.get('data'):
                 return jsonify({
                     "valid": True,
-                    "type": "monthly",
-                    "message": "Active subscription found",
+                    "type": "unlimited",
+                    "tier": "unlimited",
+                    "reports_remaining": 999999,
+                    "message": "Active subscription found — unlimited access",
                     "expiresAt": subs['data'][0].get('current_period_end', 0) * 1000
                 })
 
-            # 1b) Check checkout sessions for one-time payment (lifetime)
+            # 1b) Check checkout sessions for tier detection
             r = http_requests.get(
                 f"https://api.stripe.com/v1/checkout/sessions?customer={customer_id}&limit=20",
                 headers=headers, timeout=10
             )
             sessions = r.json()
+
+            # Check new report payment links first
+            for s in sessions.get('data', []):
+                if s.get('payment_status') != 'paid':
+                    continue
+                plink = s.get('payment_link')
+                if plink in REPORT_PAYMENT_LINKS:
+                    idx = REPORT_PAYMENT_LINKS.index(plink)
+                    detected_tier = ['single', 'pack', 'unlimited'][idx]
+                    # Save to customer
+                    http_requests.post(
+                        f"https://api.stripe.com/v1/customers/{customer_id}",
+                        headers=headers, timeout=10,
+                        data={'metadata[report_tier]': detected_tier, 'metadata[reports_used]': '0'}
+                    )
+                    limit = TIER_REPORT_LIMITS.get(detected_tier, 0)
+                    return jsonify({
+                        "valid": True,
+                        "type": detected_tier,
+                        "tier": detected_tier,
+                        "reports_used": 0,
+                        "reports_remaining": limit,
+                        "message": f"{detected_tier.title()} access verified"
+                    })
+
+            # Legacy one-time payment → treat as unlimited
             has_lifetime = any(
                 s.get('payment_status') == 'paid' and s.get('mode') == 'payment'
                 for s in sessions.get('data', [])
             )
             if has_lifetime:
-                return jsonify({"valid": True, "type": "lifetime", "message": "Lifetime access verified"})
+                return jsonify({"valid": True, "type": "unlimited", "tier": "unlimited",
+                                "reports_remaining": 999999, "message": "Lifetime access verified"})
 
             # 1c) Fallback — check payment_intents
             r = http_requests.get(
@@ -522,29 +573,25 @@ def verify_email():
             payments = r.json()
             has_payment = any(p.get('status') == 'succeeded' for p in payments.get('data', []))
             if has_payment:
-                return jsonify({"valid": True, "type": "lifetime", "message": "Payment verified"})
+                return jsonify({"valid": True, "type": "unlimited", "tier": "unlimited",
+                                "reports_remaining": 999999, "message": "Payment verified"})
 
-        # ── Step 2: Email-based fallback (no customer or customer had no payments) ──
-        # Scan checkout sessions from all known Payment Links and match by email.
-        # This catches payments made before customer_creation was set to "always".
-        PAYMENT_LINKS = os.environ.get('PAYMENT_LINK_IDS', '').split(',')
-        if not PAYMENT_LINKS or PAYMENT_LINKS == ['']:
-            # Hardcoded fallback — all Colorado Well Finder payment links ever used
-            PAYMENT_LINKS = [
-                'plink_1T0XVOFiHBHcGzRNQXGAkacg',  # Lifetime $47 (active)
-                'plink_1T0XVTFiHBHcGzRNkd9H0TWL',  # Monthly $19 (active)
-                'plink_1T0T2KFiHBHcGzRNUJfF6mTD',
-                'plink_1T0SuoFiHBHcGzRNUcVpycOk',
-                'plink_1T0SuoFiHBHcGzRN9NwMrpqm',
-                'plink_1T0Rm2FiHBHcGzRNMDlLGOxZ',
-                'plink_1T0RlwFiHBHcGzRNfHxd5vlh',
-                'plink_1T0O6zFiHBHcGzRNs0fLtb2q',
-                'plink_1T0O6sFiHBHcGzRNYinOZNvg',
-                'plink_1T0O2WFiHBHcGzRNnCDNowrR',
-                'plink_1SjAS0FiHBHcGzRNSfmm24E1',
-            ]
+        # ── Step 2: Email-based fallback ──
+        ALL_PAYMENT_LINKS = REPORT_PAYMENT_LINKS + [
+            'plink_1T0XVOFiHBHcGzRNQXGAkacg',
+            'plink_1T0XVTFiHBHcGzRNkd9H0TWL',
+            'plink_1T0T2KFiHBHcGzRNUJfF6mTD',
+            'plink_1T0SuoFiHBHcGzRNUcVpycOk',
+            'plink_1T0SuoFiHBHcGzRN9NwMrpqm',
+            'plink_1T0Rm2FiHBHcGzRNMDlLGOxZ',
+            'plink_1T0RlwFiHBHcGzRNfHxd5vlh',
+            'plink_1T0O6zFiHBHcGzRNs0fLtb2q',
+            'plink_1T0O6sFiHBHcGzRNYinOZNvg',
+            'plink_1T0O2WFiHBHcGzRNnCDNowrR',
+            'plink_1SjAS0FiHBHcGzRNSfmm24E1',
+        ]
 
-        for plink_id in PAYMENT_LINKS:
+        for plink_id in ALL_PAYMENT_LINKS:
             plink_id = plink_id.strip()
             if not plink_id:
                 continue
@@ -557,14 +604,29 @@ def verify_email():
                 for s in sessions.get('data', []):
                     cd = s.get('customer_details') or {}
                     if cd.get('email', '').lower() == email and s.get('payment_status') == 'paid':
-                        access_type = 'monthly' if s.get('mode') == 'subscription' else 'lifetime'
+                        # New report links → detect tier
+                        if plink_id in REPORT_PAYMENT_LINKS:
+                            idx = REPORT_PAYMENT_LINKS.index(plink_id)
+                            detected_tier = ['single', 'pack', 'unlimited'][idx]
+                            limit = TIER_REPORT_LIMITS.get(detected_tier, 0)
+                            return jsonify({
+                                "valid": True,
+                                "type": detected_tier,
+                                "tier": detected_tier,
+                                "reports_remaining": limit,
+                                "message": f"{detected_tier.title()} access verified"
+                            })
+                        # Legacy links → unlimited
+                        access_type = 'unlimited'
                         return jsonify({
                             "valid": True,
                             "type": access_type,
-                            "message": f"{access_type.title()} access verified (payment found)"
+                            "tier": access_type,
+                            "reports_remaining": 999999,
+                            "message": f"Lifetime access verified (payment found)"
                         })
             except Exception:
-                continue  # Skip this payment link if API call fails
+                continue
 
         return jsonify({"valid": False, "message": "No active subscription found for this email"})
 
@@ -807,6 +869,565 @@ def nearby_features():
         conn.close()
 
 
+# ─── PDF Report Generation ───────────────────────────────────────────────────
+
+# New payment link IDs for report verification
+REPORT_PAYMENT_LINKS = [
+    'plink_1T215ZCSH1YJHcuWVktIj4RW',   # Single $19
+    'plink_1T215fCSH1YJHcuWd6wiCnrI',   # Pack $49
+    'plink_1T215kCSH1YJHcuWxo8TKhcw',   # Unlimited $97
+]
+
+TIER_REPORT_LIMITS = {
+    'single': 1,
+    'pack': 10,
+    'unlimited': 999999,
+}
+
+
+def _verify_report_access(email):
+    """Check if email has report access and return tier info."""
+    if not STRIPE_SECRET_KEY:
+        return None
+    if email in OWNER_EMAILS:
+        return {'tier': 'unlimited', 'reports_remaining': 999999}
+
+    headers = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
+
+    try:
+        # Check customer-based first
+        r = http_requests.get(
+            f"https://api.stripe.com/v1/customers?email={email}&limit=1",
+            headers=headers, timeout=10
+        )
+        customers = r.json()
+        cust_id = customers['data'][0]['id'] if customers.get('data') else None
+
+        if cust_id:
+            # Get customer metadata for report tracking
+            cust = customers['data'][0]
+            meta = cust.get('metadata', {})
+            tier = meta.get('report_tier')
+            used = int(meta.get('reports_used', '0'))
+
+            if tier:
+                limit = TIER_REPORT_LIMITS.get(tier, 0)
+                return {
+                    'tier': tier,
+                    'customer_id': cust_id,
+                    'reports_used': used,
+                    'reports_remaining': max(0, limit - used),
+                }
+
+            # No tier set yet — check checkout sessions to determine tier
+            r = http_requests.get(
+                f"https://api.stripe.com/v1/checkout/sessions?customer={cust_id}&limit=20",
+                headers=headers, timeout=10
+            )
+            sessions = r.json()
+            for s in sessions.get('data', []):
+                if s.get('payment_status') != 'paid':
+                    continue
+                # Check payment link metadata for tier
+                plink = s.get('payment_link')
+                if plink in REPORT_PAYMENT_LINKS:
+                    idx = REPORT_PAYMENT_LINKS.index(plink)
+                    detected_tier = ['single', 'pack', 'unlimited'][idx]
+                    # Set tier on customer for future lookups
+                    http_requests.post(
+                        f"https://api.stripe.com/v1/customers/{cust_id}",
+                        headers=headers, timeout=10,
+                        data={'metadata[report_tier]': detected_tier, 'metadata[reports_used]': '0'}
+                    )
+                    limit = TIER_REPORT_LIMITS.get(detected_tier, 0)
+                    return {
+                        'tier': detected_tier,
+                        'customer_id': cust_id,
+                        'reports_used': 0,
+                        'reports_remaining': limit,
+                    }
+
+            # Fallback — check if any successful one-time payment (legacy lifetime buyers)
+            has_payment = any(
+                s.get('payment_status') == 'paid' and s.get('mode') == 'payment'
+                for s in sessions.get('data', [])
+            )
+            if has_payment:
+                return {'tier': 'unlimited', 'customer_id': cust_id, 'reports_remaining': 999999}
+
+            # Check subscriptions (legacy monthly)
+            r = http_requests.get(
+                f"https://api.stripe.com/v1/subscriptions?customer={cust_id}&status=active&limit=1",
+                headers=headers, timeout=10
+            )
+            if r.json().get('data'):
+                return {'tier': 'unlimited', 'customer_id': cust_id, 'reports_remaining': 999999}
+
+        # Email-based fallback for all payment links (old + new)
+        all_plinks = REPORT_PAYMENT_LINKS + [
+            'plink_1T0XVOFiHBHcGzRNQXGAkacg', 'plink_1T0XVTFiHBHcGzRNkd9H0TWL',
+        ]
+        for plink_id in all_plinks:
+            try:
+                r = http_requests.get(
+                    f"https://api.stripe.com/v1/checkout/sessions?payment_link={plink_id}&limit=100",
+                    headers=headers, timeout=15
+                )
+                for s in r.json().get('data', []):
+                    cd = s.get('customer_details') or {}
+                    if cd.get('email', '').lower() == email and s.get('payment_status') == 'paid':
+                        # Legacy buyers get unlimited
+                        if plink_id not in REPORT_PAYMENT_LINKS:
+                            return {'tier': 'unlimited', 'reports_remaining': 999999}
+                        idx = REPORT_PAYMENT_LINKS.index(plink_id)
+                        detected_tier = ['single', 'pack', 'unlimited'][idx]
+                        return {
+                            'tier': detected_tier,
+                            'reports_remaining': TIER_REPORT_LIMITS.get(detected_tier, 0),
+                        }
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    return None
+
+
+def _increment_reports_used(customer_id, current_used):
+    """Increment the reports_used counter on the Stripe customer."""
+    if not customer_id or not STRIPE_SECRET_KEY:
+        return
+    headers = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
+    try:
+        http_requests.post(
+            f"https://api.stripe.com/v1/customers/{customer_id}",
+            headers=headers, timeout=10,
+            data={'metadata[reports_used]': str(current_used + 1)}
+        )
+    except Exception:
+        pass
+
+
+def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats):
+    """Generate a professional PDF well report using ReportLab."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.colors import HexColor
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                     TableStyle, HRFlowable, KeepTogether)
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.5*inch,
+                            bottomMargin=0.6*inch, leftMargin=0.7*inch, rightMargin=0.7*inch)
+
+    # Colors
+    NAVY = HexColor('#0a1628')
+    BLUE = HexColor('#00b4d8')
+    DARK_BLUE = HexColor('#0096c7')
+    LIGHT_BG = HexColor('#f0f9ff')
+    GREEN = HexColor('#22c55e')
+    RED = HexColor('#ef4444')
+    AMBER = HexColor('#f59e0b')
+    GRAY = HexColor('#64748b')
+    DARK = HexColor('#1e293b')
+    WHITE = HexColor('#ffffff')
+
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = ParagraphStyle('ReportTitle', parent=styles['Title'],
+        fontSize=22, textColor=NAVY, spaceAfter=4, fontName='Helvetica-Bold')
+    subtitle_style = ParagraphStyle('ReportSubtitle', parent=styles['Normal'],
+        fontSize=11, textColor=GRAY, spaceAfter=20)
+    heading_style = ParagraphStyle('SectionHead', parent=styles['Heading2'],
+        fontSize=14, textColor=NAVY, spaceBefore=16, spaceAfter=8,
+        fontName='Helvetica-Bold', borderPadding=(0, 0, 4, 0))
+    body_style = ParagraphStyle('Body', parent=styles['Normal'],
+        fontSize=10, textColor=DARK, leading=14)
+    small_style = ParagraphStyle('Small', parent=styles['Normal'],
+        fontSize=8.5, textColor=GRAY, leading=11)
+    stat_label = ParagraphStyle('StatLabel', parent=styles['Normal'],
+        fontSize=9, textColor=GRAY)
+    stat_value = ParagraphStyle('StatValue', parent=styles['Normal'],
+        fontSize=16, textColor=NAVY, fontName='Helvetica-Bold')
+    center_style = ParagraphStyle('Center', parent=styles['Normal'],
+        fontSize=10, textColor=DARK, alignment=TA_CENTER)
+
+    elements = []
+
+    # ── Header ──
+    now = datetime.now(timezone.utc).strftime('%B %d, %Y')
+    elements.append(Paragraph('Colorado Well Finder', title_style))
+    elements.append(Paragraph('PROPERTY WELL REPORT', ParagraphStyle('Badge',
+        parent=styles['Normal'], fontSize=10, textColor=BLUE,
+        fontName='Helvetica-Bold', spaceAfter=2, letterSpacing=2)))
+    elements.append(Spacer(1, 4))
+    elements.append(HRFlowable(width='100%', thickness=2, color=BLUE, spaceAfter=12))
+    elements.append(Paragraph(f'<b>Property:</b> {address}', body_style))
+    elements.append(Paragraph(f'<b>Coordinates:</b> {lat:.6f}, {lng:.6f}', body_style))
+    elements.append(Paragraph(f'<b>Generated:</b> {now}', body_style))
+    elements.append(Spacer(1, 16))
+
+    # ── Key Stats Summary ──
+    avg_depth = area_stats.get('avg_depth', 'N/A')
+    well_count = area_stats.get('total_nearby', 0)
+    min_depth = area_stats.get('min_depth', 'N/A')
+    max_depth = area_stats.get('max_depth', 'N/A')
+    hazard_count = area_stats.get('hazard_count', 0)
+
+    cost_low = f"${int(float(avg_depth) * 50):,}" if isinstance(avg_depth, (int, float)) else 'N/A'
+    cost_high = f"${int(float(avg_depth) * 75):,}" if isinstance(avg_depth, (int, float)) else 'N/A'
+    avg_depth_str = f"{int(avg_depth)} ft" if isinstance(avg_depth, (int, float)) else 'N/A'
+
+    stat_data = [
+        [Paragraph('Nearby Wells', stat_label), Paragraph('Avg Depth', stat_label),
+         Paragraph('Est. Cost', stat_label), Paragraph('Hazards', stat_label)],
+        [Paragraph(str(well_count), stat_value),
+         Paragraph(avg_depth_str, stat_value),
+         Paragraph(f"{cost_low}–{cost_high}" if cost_low != 'N/A' else 'N/A', stat_value),
+         Paragraph(str(hazard_count), ParagraphStyle('HazVal', parent=stat_value,
+             textColor=RED if hazard_count > 0 else GREEN))],
+    ]
+    stat_table = Table(stat_data, colWidths=[doc.width/4]*4)
+    stat_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
+        ('BOX', (0, 0), (-1, -1), 1, HexColor('#e0f2fe')),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 2),
+        ('TOPPADDING', (0, 1), (-1, 1), 2),
+        ('BOTTOMPADDING', (0, 1), (-1, 1), 10),
+        ('ROUNDEDCORNERS', [6, 6, 6, 6]),
+    ]))
+    elements.append(stat_table)
+    elements.append(Spacer(1, 16))
+
+    # ── Nearby Wells Table ──
+    elements.append(Paragraph('Nearby Well Records', heading_style))
+    elements.append(Paragraph(
+        f'Wells within 5 miles of the property, sorted by distance. '
+        f'Based on official state well permit records.', small_style))
+    elements.append(Spacer(1, 6))
+
+    if wells:
+        header = ['Distance', 'Depth', 'Water Lvl', 'Yield', 'Aquifer', 'County', 'Year']
+        table_data = [header]
+        for w in wells[:25]:  # Cap at 25 wells
+            dist = f"{w.get('distance_miles', 0):.1f} mi" if w.get('distance_miles') else '—'
+            depth = f"{int(w['depth_total'])} ft" if w.get('depth_total') else '—'
+            swl = f"{int(w['static_water_level'])} ft" if w.get('static_water_level') else '—'
+            yld = f"{w['pump_yield_gpm']} GPM" if w.get('pump_yield_gpm') else '—'
+            aq = (w.get('aquifers') or '—')[:20]
+            county = (w.get('county') or '—')[:15]
+            year = ''
+            if w.get('date_completed'):
+                try:
+                    year = str(w['date_completed'])[:4]
+                except Exception:
+                    year = '—'
+            table_data.append([dist, depth, swl, yld, aq, county, year or '—'])
+
+        col_widths = [0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 1.5*inch, 1.1*inch, 0.6*inch]
+        well_table = Table(table_data, colWidths=col_widths, repeatRows=1)
+        well_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), NAVY),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 8.5),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(well_table)
+    else:
+        elements.append(Paragraph('No well records found within 5 miles of this property.', body_style))
+
+    elements.append(Spacer(1, 16))
+
+    # ── Drilling Cost Estimate ──
+    elements.append(Paragraph('Drilling Cost Estimate', heading_style))
+    if isinstance(avg_depth, (int, float)) and avg_depth > 0:
+        elements.append(Paragraph(
+            f'Based on <b>{well_count} nearby wells</b> with an average depth of '
+            f'<b>{int(avg_depth)} ft</b>, using Colorado\'s typical rate of $50–$75 per foot:', body_style))
+        elements.append(Spacer(1, 6))
+
+        cost_data = [
+            ['Scenario', 'Depth', 'Cost @ $50/ft', 'Cost @ $75/ft'],
+            ['If shallow (minimum)', f"{int(min_depth)} ft",
+             f"${int(float(min_depth)*50):,}", f"${int(float(min_depth)*75):,}"],
+            ['Average for area', f"{int(avg_depth)} ft",
+             f"${int(float(avg_depth)*50):,}", f"${int(float(avg_depth)*75):,}"],
+            ['If deep (maximum)', f"{int(max_depth)} ft",
+             f"${int(float(max_depth)*50):,}", f"${int(float(max_depth)*75):,}"],
+        ]
+        cost_table = Table(cost_data, colWidths=[1.5*inch, 1.2*inch, 1.3*inch, 1.3*inch])
+        cost_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), DARK_BLUE),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        elements.append(cost_table)
+    else:
+        elements.append(Paragraph(
+            'Insufficient depth data in the area to generate a cost estimate.', body_style))
+
+    elements.append(Spacer(1, 16))
+
+    # ── Environmental Hazard Scan ──
+    elements.append(Paragraph('Environmental Hazard Scan', heading_style))
+    elements.append(Paragraph(
+        'EPA contamination sites and Superfund locations within 5 miles of the property.', small_style))
+    elements.append(Spacer(1, 6))
+
+    if hazards:
+        haz_header = ['Type', 'Name', 'Distance', 'Status']
+        haz_data = [haz_header]
+        for h in hazards[:15]:
+            htype = 'Superfund' if h.get('_type') == 'superfund' else 'EPA Site'
+            name = (h.get('site_name') or '—')[:35]
+            dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '—'
+            status = (h.get('npl_status') or h.get('category') or '—')[:20]
+            haz_data.append([htype, name, dist, status])
+
+        haz_table = Table(haz_data, colWidths=[1*inch, 2.5*inch, 0.8*inch, 1.7*inch], repeatRows=1)
+        haz_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), RED),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#fef2f2')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#fca5a5')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(haz_table)
+    else:
+        elements.append(Paragraph(
+            '<font color="#22c55e">&#10003;</font> <b>No EPA contamination sites or Superfund locations found within 5 miles.</b>',
+            body_style))
+
+    elements.append(Spacer(1, 20))
+
+    # ── Depth Distribution ──
+    if wells:
+        elements.append(Paragraph('Area Well Depth Distribution', heading_style))
+        shallow = sum(1 for w in wells if w.get('depth_total') and w['depth_total'] < 200)
+        medium = sum(1 for w in wells if w.get('depth_total') and 200 <= w['depth_total'] < 500)
+        deep_ = sum(1 for w in wells if w.get('depth_total') and w['depth_total'] >= 500)
+        total_w = len([w for w in wells if w.get('depth_total')])
+
+        if total_w > 0:
+            dist_data = [
+                ['Depth Range', 'Count', 'Percentage'],
+                ['Under 200 ft (shallow)', str(shallow), f"{shallow/total_w*100:.0f}%"],
+                ['200–500 ft (moderate)', str(medium), f"{medium/total_w*100:.0f}%"],
+                ['Over 500 ft (deep)', str(deep_), f"{deep_/total_w*100:.0f}%"],
+            ]
+            dist_table = Table(dist_data, colWidths=[2.5*inch, 1.2*inch, 1.2*inch])
+            dist_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), NAVY),
+                ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
+                ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ]))
+            elements.append(dist_table)
+            elements.append(Spacer(1, 16))
+
+    # ── Footer / Disclaimer ──
+    elements.append(HRFlowable(width='100%', thickness=1, color=HexColor('#e2e8f0'), spaceAfter=8))
+    elements.append(Paragraph(
+        '<b>Disclaimer:</b> This report is based on publicly available state well permit records and EPA data. '
+        'Well depths and water levels vary by location and geology. Actual drilling costs depend on driller, '
+        'terrain, rock type, and permit requirements. This report is for informational purposes only and does '
+        'not constitute professional geological or engineering advice. Consult a licensed well driller for '
+        'site-specific estimates.', small_style))
+    elements.append(Spacer(1, 8))
+    elements.append(Paragraph(
+        f'© {datetime.now().year} Colorado Well Finder — coloradowell.com', 
+        ParagraphStyle('Footer', parent=small_style, alignment=TA_CENTER, textColor=BLUE)))
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
+@app.route('/api/report', methods=['POST'])
+def generate_report():
+    """Generate a PDF well report for an address.
+    
+    POST body: { email, address, lat, lng }
+    Returns: PDF file download
+    """
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    address = (data.get('address') or '').strip()
+    
+    try:
+        lat = float(data.get('lat'))
+        lng = float(data.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "lat and lng required"}), 400
+
+    if not email:
+        return jsonify({"error": "Email required for report generation"}), 400
+    if not address:
+        return jsonify({"error": "Address required"}), 400
+
+    # Verify access
+    access = _verify_report_access(email)
+    if not access:
+        return jsonify({"error": "No valid purchase found for this email", "needsPurchase": True}), 403
+
+    if access.get('reports_remaining', 0) <= 0 and access['tier'] != 'unlimited':
+        return jsonify({
+            "error": "All report credits used",
+            "tier": access['tier'],
+            "reports_used": access.get('reports_used', 0),
+            "needsUpgrade": True,
+        }), 403
+
+    # Query nearby wells (5 mile radius)
+    radius_miles = 5
+    lat_range = radius_miles / 69.0
+    lng_range = radius_miles / (69.0 * max(math.cos(math.radians(lat)), 0.01))
+    min_lat, max_lat = lat - lat_range, lat + lat_range
+    min_lng, max_lng = lng - lng_range, lng + lng_range
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+
+        # Get nearby wells with distance
+        cur.execute("""
+            SELECT receipt, permit, latitude, longitude, depth_total,
+                   static_water_level, pump_yield_gpm, aquifers, county,
+                   owner_name, uses, status, driller_name, date_completed,
+                   address, city,
+                   SQRT(POW((latitude - %s) * 69.0, 2) +
+                        POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                   ) AS distance_miles
+            FROM wells
+            WHERE latitude BETWEEN %s AND %s
+              AND longitude BETWEEN %s AND %s
+              AND depth_total > 0
+              AND latitude IS NOT NULL
+            ORDER BY distance_miles
+            LIMIT 50
+        """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+        wells = [dict(r) for r in cur.fetchall()]
+
+        # Get nearby EPA sites
+        cur.execute("""
+            SELECT site_name, latitude, longitude, category, npl_status,
+                   SQRT(POW((latitude - %s) * 69.0, 2) +
+                        POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                   ) AS distance_miles
+            FROM epa_sites
+            WHERE latitude BETWEEN %s AND %s
+              AND longitude BETWEEN %s AND %s
+            ORDER BY distance_miles
+            LIMIT 20
+        """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+        epa = [dict(r) for r in cur.fetchall()]
+        for e in epa:
+            e['_type'] = 'epa'
+
+        # Get nearby Superfund sites
+        cur.execute("""
+            SELECT site_name, latitude, longitude, npl_status,
+                   SQRT(POW((latitude - %s) * 69.0, 2) +
+                        POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                   ) AS distance_miles
+            FROM superfund_sites
+            WHERE latitude BETWEEN %s AND %s
+              AND longitude BETWEEN %s AND %s
+            ORDER BY distance_miles
+            LIMIT 10
+        """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+        superfund = [dict(r) for r in cur.fetchall()]
+        for s in superfund:
+            s['_type'] = 'superfund'
+
+        hazards = sorted(epa + superfund, key=lambda x: x.get('distance_miles', 99))
+
+    finally:
+        conn.close()
+
+    # Calculate area stats
+    depths = [w['depth_total'] for w in wells if w.get('depth_total')]
+    area_stats = {
+        'total_nearby': len(wells),
+        'avg_depth': round(sum(depths) / len(depths), 1) if depths else None,
+        'min_depth': min(depths) if depths else None,
+        'max_depth': max(depths) if depths else None,
+        'hazard_count': len(hazards),
+    }
+
+    # Generate PDF
+    pdf_buf = _generate_report_pdf(address, lat, lng, wells, hazards, area_stats)
+
+    # Increment report usage (non-blocking)
+    if access.get('customer_id') and access['tier'] != 'unlimited':
+        _increment_reports_used(access['customer_id'], access.get('reports_used', 0))
+
+    # Create filename from address
+    safe_addr = ''.join(c if c.isalnum() or c in ' -' else '' for c in address)[:50].strip()
+    filename = f"Well_Report_{safe_addr}_{datetime.now().strftime('%Y%m%d')}.pdf"
+
+    return send_file(
+        pdf_buf,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+@app.route('/api/report/status', methods=['POST'])
+def report_status():
+    """Check how many reports a user has remaining.
+    
+    POST body: { email }
+    Returns: { tier, reports_used, reports_remaining }
+    """
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+
+    if not email:
+        return jsonify({"error": "Email required"}), 400
+
+    access = _verify_report_access(email)
+    if not access:
+        return jsonify({"hasAccess": False})
+
+    return jsonify({
+        "hasAccess": True,
+        "tier": access['tier'],
+        "reports_used": access.get('reports_used', 0),
+        "reports_remaining": access.get('reports_remaining', 0),
+    })
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -828,7 +1449,9 @@ def home():
             "GET /api/overlay/<layer>/<id>",
             "GET /api/overlay/stats",
             "GET /api/nearby?lat=&lng=&radius=5&layers=contamination,dams",
-            "POST /api/verify {email}"
+            "POST /api/verify {email}",
+            "POST /api/report {email, address, lat, lng}",
+            "POST /api/report/status {email}"
         ],
         "overlay_info": {k: v['label'] for k, v in OVERLAY_LAYERS.items()},
     })
