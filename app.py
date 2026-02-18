@@ -136,26 +136,28 @@ def wells_bbox():
         extra_where = f"AND {state_cond}" if state_cond else ""
         depth_filter = "AND depth_total > 0" if has_depth else ""
 
-        # At wide zoom (large bbox), use TABLESAMPLE SYSTEM for fast random page sampling.
-        # This reads only a few % of disk pages — 100x faster than ORDER BY RANDOM().
+        # At wide zoom (large bbox), use hash-based sampling for fast, distributed results.
+        # hashtext(receipt) gives deterministic pseudo-random values; modulo selects ~1/Nth.
+        # This uses the spatial index (fast), evaluates hash per-row (cheap), no sorting.
         lat_span = max_lat - min_lat
         lng_span = max_lng - min_lng
         bbox_area = lat_span * lng_span
 
         if bbox_area > 4:
-            # Sample enough pages to return `limit` wells after bbox + depth filtering
-            sample_pct = min(50, max(3, limit / 1000))
+            # Estimate ~600K wells in a large bbox; pick modulus to return ~limit results
+            modulus = max(5, int(600000 / limit))
             cur.execute(f"""
                 SELECT receipt, permit, latitude, longitude, depth_total,
                        status, county, uses, pump_yield_gpm, static_water_level,
                        aquifers, driller_name, date_completed, address, city,
                        owner_name, category, elevation, well_state
-                FROM wells TABLESAMPLE SYSTEM ({sample_pct})
+                FROM wells
                 WHERE latitude BETWEEN %s AND %s
                   AND longitude BETWEEN %s AND %s
                   AND latitude IS NOT NULL
                   AND longitude IS NOT NULL
                   {depth_filter}
+                  AND hashtext(receipt) %% {modulus} = 0
                   {extra_where}
                 LIMIT %s
             """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
