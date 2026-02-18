@@ -136,34 +136,27 @@ def wells_bbox():
         extra_where = f"AND {state_cond}" if state_cond else ""
         depth_filter = "AND depth_total > 0" if has_depth else ""
 
-        # At wide zoom (large bbox), use grid sampling for even distribution.
-        # Each well maps to a grid cell; we pick one random well per cell.
+        # At wide zoom (large bbox), random-sample for even spatial distribution.
+        # PostgreSQL top-N heapsort makes ORDER BY RANDOM() LIMIT n efficient: O(N log n).
         lat_span = max_lat - min_lat
         lng_span = max_lng - min_lng
         bbox_area = lat_span * lng_span
 
         if bbox_area > 4:
-            # Wide view — grid-sample for distribution across the map
-            # ~0.15 degree grid ≈ 10 mile cells
+            # Wide view — random sample spreads wells across all counties
             cur.execute(f"""
-                SELECT DISTINCT ON (grid_lat, grid_lng)
-                       receipt, permit, latitude, longitude, depth_total,
+                SELECT receipt, permit, latitude, longitude, depth_total,
                        status, county, uses, pump_yield_gpm, static_water_level,
                        aquifers, driller_name, date_completed, address, city,
                        owner_name, category, elevation, well_state
-                FROM (
-                    SELECT *,
-                           ROUND(latitude::numeric / 0.15) AS grid_lat,
-                           ROUND(longitude::numeric / 0.15) AS grid_lng
-                    FROM wells
-                    WHERE latitude BETWEEN %s AND %s
-                      AND longitude BETWEEN %s AND %s
-                      AND latitude IS NOT NULL
-                      AND longitude IS NOT NULL
-                      {depth_filter}
-                      {extra_where}
-                ) sub
-                ORDER BY grid_lat, grid_lng, RANDOM()
+                FROM wells
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                  AND latitude IS NOT NULL
+                  AND longitude IS NOT NULL
+                  {depth_filter}
+                  {extra_where}
+                ORDER BY RANDOM()
                 LIMIT %s
             """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
         else:
