@@ -114,6 +114,7 @@ def wells_bbox():
       minLat, maxLat, minLng, maxLng  (required)
       state  (optional — CO, AZ, NM or comma-separated)
       limit  (optional, default 10000, max 50000)
+      hasDepth (optional — if 'true', only return wells with depth_total > 0)
     """
     try:
         min_lat = float(request.args.get('minLat', 0))
@@ -121,6 +122,7 @@ def wells_bbox():
         min_lng = float(request.args.get('minLng', 0))
         max_lng = float(request.args.get('maxLng', 0))
         limit = min(int(request.args.get('limit', 10000)), 50000)
+        has_depth = request.args.get('hasDepth', 'false').lower() == 'true'
     except (ValueError, TypeError) as e:
         return jsonify({"error": f"Invalid parameters: {e}"}), 400
 
@@ -132,19 +134,54 @@ def wells_bbox():
         cur = conn.cursor()
         state_cond, state_params = parse_state_filter()
         extra_where = f"AND {state_cond}" if state_cond else ""
-        cur.execute(f"""
-            SELECT receipt, permit, latitude, longitude, depth_total,
-                   status, county, uses, pump_yield_gpm, static_water_level,
-                   aquifers, driller_name, date_completed, address, city,
-                   owner_name, category, elevation, well_state
-            FROM wells
-            WHERE latitude BETWEEN %s AND %s
-              AND longitude BETWEEN %s AND %s
-              AND latitude IS NOT NULL
-              AND longitude IS NOT NULL
-              {extra_where}
-            LIMIT %s
-        """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
+        depth_filter = "AND depth_total > 0" if has_depth else ""
+
+        # At wide zoom (large bbox), use grid sampling for even distribution.
+        # Each well maps to a grid cell; we pick one random well per cell.
+        lat_span = max_lat - min_lat
+        lng_span = max_lng - min_lng
+        bbox_area = lat_span * lng_span
+
+        if bbox_area > 4:
+            # Wide view — grid-sample for distribution across the map
+            # ~0.15 degree grid ≈ 10 mile cells
+            cur.execute(f"""
+                SELECT DISTINCT ON (grid_lat, grid_lng)
+                       receipt, permit, latitude, longitude, depth_total,
+                       status, county, uses, pump_yield_gpm, static_water_level,
+                       aquifers, driller_name, date_completed, address, city,
+                       owner_name, category, elevation, well_state
+                FROM (
+                    SELECT *,
+                           ROUND(latitude::numeric / 0.15) AS grid_lat,
+                           ROUND(longitude::numeric / 0.15) AS grid_lng
+                    FROM wells
+                    WHERE latitude BETWEEN %s AND %s
+                      AND longitude BETWEEN %s AND %s
+                      AND latitude IS NOT NULL
+                      AND longitude IS NOT NULL
+                      {depth_filter}
+                      {extra_where}
+                ) sub
+                ORDER BY grid_lat, grid_lng, RANDOM()
+                LIMIT %s
+            """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
+        else:
+            cur.execute(f"""
+                SELECT receipt, permit, latitude, longitude, depth_total,
+                       status, county, uses, pump_yield_gpm, static_water_level,
+                       aquifers, driller_name, date_completed, address, city,
+                       owner_name, category, elevation, well_state
+                FROM wells
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                  AND latitude IS NOT NULL
+                  AND longitude IS NOT NULL
+                  {depth_filter}
+                  {extra_where}
+                LIMIT %s
+            """, (min_lat, max_lat, min_lng, max_lng, *state_params, limit))
+
         rows = cur.fetchall()
         return jsonify({
             "wells": rows,
