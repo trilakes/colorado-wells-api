@@ -1104,414 +1104,661 @@ def _compute_water_risk_score(hazards, radon_info=None):
 
 
 def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=None):
-    """Generate a professional PDF well report using ReportLab."""
+    """Generate an ultra-premium PDF property water & environmental risk report."""
     from reportlab.lib.pagesizes import letter
-    from reportlab.lib.colors import HexColor
+    from reportlab.lib.colors import HexColor, Color
     from reportlab.lib.units import inch
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                     TableStyle, HRFlowable, KeepTogether)
+                                     TableStyle, HRFlowable, KeepTogether, PageBreak,
+                                     CondPageBreak)
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    import hashlib
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.5*inch,
-                            bottomMargin=0.6*inch, leftMargin=0.7*inch, rightMargin=0.7*inch)
+    W, H = letter
 
-    # Colors
-    NAVY = HexColor('#0a1628')
-    BLUE = HexColor('#00b4d8')
-    DARK_BLUE = HexColor('#0096c7')
-    LIGHT_BG = HexColor('#f0f9ff')
-    GREEN = HexColor('#22c55e')
-    RED = HexColor('#ef4444')
-    AMBER = HexColor('#f59e0b')
-    GRAY = HexColor('#64748b')
-    DARK = HexColor('#1e293b')
-    WHITE = HexColor('#ffffff')
+    # ── Color Palette ──
+    NAVY       = HexColor('#0a1628')
+    SLATE      = HexColor('#1e293b')
+    BLUE       = HexColor('#0284c7')
+    LIGHT_BLUE = HexColor('#e0f2fe')
+    ICE        = HexColor('#f0f9ff')
+    GREEN      = HexColor('#16a34a')
+    L_GREEN    = HexColor('#f0fdf4')
+    RED        = HexColor('#dc2626')
+    L_RED      = HexColor('#fef2f2')
+    AMBER      = HexColor('#d97706')
+    L_AMBER    = HexColor('#fffbeb')
+    PURPLE     = HexColor('#7c3aed')
+    L_PURPLE   = HexColor('#f5f3ff')
+    BROWN      = HexColor('#78350f')
+    L_BROWN    = HexColor('#fef3c7')
+    GRAY       = HexColor('#64748b')
+    LGRAY      = HexColor('#f1f5f9')
+    BORDER     = HexColor('#e2e8f0')
+    WHITE      = HexColor('#ffffff')
+
+    # ── Generate Report ID ──
+    report_hash = hashlib.md5(f"{address}{lat}{lng}{datetime.now().isoformat()}".encode()).hexdigest()[:8].upper()
+    report_id = f"CWF-{report_hash}"
+    now_str = datetime.now(timezone.utc).strftime('%B %d, %Y')
 
     styles = getSampleStyleSheet()
 
-    # Custom styles
-    title_style = ParagraphStyle('ReportTitle', parent=styles['Title'],
-        fontSize=22, textColor=NAVY, spaceAfter=4, fontName='Helvetica-Bold')
-    subtitle_style = ParagraphStyle('ReportSubtitle', parent=styles['Normal'],
-        fontSize=11, textColor=GRAY, spaceAfter=20)
-    heading_style = ParagraphStyle('SectionHead', parent=styles['Heading2'],
-        fontSize=14, textColor=NAVY, spaceBefore=16, spaceAfter=8,
-        fontName='Helvetica-Bold', borderPadding=(0, 0, 4, 0))
-    body_style = ParagraphStyle('Body', parent=styles['Normal'],
-        fontSize=10, textColor=DARK, leading=14)
-    small_style = ParagraphStyle('Small', parent=styles['Normal'],
-        fontSize=8.5, textColor=GRAY, leading=11)
-    stat_label = ParagraphStyle('StatLabel', parent=styles['Normal'],
-        fontSize=9, textColor=GRAY)
-    stat_value = ParagraphStyle('StatValue', parent=styles['Normal'],
-        fontSize=16, textColor=NAVY, fontName='Helvetica-Bold')
-    center_style = ParagraphStyle('Center', parent=styles['Normal'],
-        fontSize=10, textColor=DARK, alignment=TA_CENTER)
+    # ── Typography System ──
+    s_cover_title = ParagraphStyle('CoverTitle', fontName='Helvetica-Bold',
+        fontSize=24, textColor=NAVY, leading=30, alignment=TA_CENTER)
+    s_cover_sub = ParagraphStyle('CoverSub', fontName='Helvetica',
+        fontSize=11, textColor=GRAY, leading=16, alignment=TA_CENTER, spaceAfter=6)
+    s_cover_addr = ParagraphStyle('CoverAddr', fontName='Helvetica-Bold',
+        fontSize=13, textColor=SLATE, leading=18, alignment=TA_CENTER, spaceAfter=4)
+    s_cover_meta = ParagraphStyle('CoverMeta', fontName='Helvetica',
+        fontSize=9, textColor=GRAY, leading=13, alignment=TA_CENTER)
+
+    s_section = ParagraphStyle('Section', fontName='Helvetica-Bold',
+        fontSize=15, textColor=NAVY, spaceBefore=18, spaceAfter=6, leading=19)
+    s_subsection = ParagraphStyle('SubSection', fontName='Helvetica-Bold',
+        fontSize=11, textColor=SLATE, spaceBefore=12, spaceAfter=4, leading=14)
+    s_body = ParagraphStyle('Body', fontName='Helvetica',
+        fontSize=9.5, textColor=SLATE, leading=14, spaceAfter=4)
+    s_body_sm = ParagraphStyle('BodySm', fontName='Helvetica',
+        fontSize=8.5, textColor=GRAY, leading=12)
+    s_interp = ParagraphStyle('Interp', fontName='Helvetica-Oblique',
+        fontSize=9.5, textColor=SLATE, leading=14, spaceAfter=6,
+        borderColor=LIGHT_BLUE, borderWidth=0, borderPadding=8,
+        leftIndent=10, rightIndent=10)
+    s_label = ParagraphStyle('Label', fontName='Helvetica',
+        fontSize=8, textColor=GRAY, alignment=TA_CENTER)
+    s_value = ParagraphStyle('Value', fontName='Helvetica-Bold',
+        fontSize=15, textColor=NAVY, alignment=TA_CENTER)
+    s_tag = ParagraphStyle('Tag', fontName='Helvetica-Bold',
+        fontSize=8.5, textColor=WHITE, alignment=TA_CENTER)
+    s_footer = ParagraphStyle('Footer', fontName='Helvetica',
+        fontSize=7.5, textColor=GRAY, alignment=TA_CENTER)
+    s_disclaimer = ParagraphStyle('Disclaimer', fontName='Helvetica',
+        fontSize=7.5, textColor=GRAY, leading=10)
+
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.6*inch,
+        bottomMargin=0.5*inch, leftMargin=0.65*inch, rightMargin=0.65*inch)
+    pw = doc.width  # printable width
 
     elements = []
 
-    # ── Header ──
-    now = datetime.now(timezone.utc).strftime('%B %d, %Y')
-    elements.append(Paragraph('Colorado Well Finder', title_style))
-    elements.append(Paragraph('PROPERTY WELL REPORT', ParagraphStyle('Badge',
-        parent=styles['Normal'], fontSize=10, textColor=BLUE,
-        fontName='Helvetica-Bold', spaceAfter=2, letterSpacing=2)))
-    elements.append(Spacer(1, 4))
-    elements.append(HRFlowable(width='100%', thickness=2, color=BLUE, spaceAfter=12))
-    elements.append(Paragraph(f'<b>Property:</b> {address}', body_style))
-    elements.append(Paragraph(f'<b>Coordinates:</b> {lat:.6f}, {lng:.6f}', body_style))
-    elements.append(Paragraph(f'<b>Generated:</b> {now}', body_style))
-    elements.append(Spacer(1, 16))
+    def risk_color_fn(level):
+        level = (level or '').lower()
+        if level in ('high', 'elevated', 'significant'):
+            return RED
+        elif level in ('moderate', 'medium'):
+            return AMBER
+        return GREEN
 
-    # ── Key Stats Summary ──
-    avg_depth = area_stats.get('avg_depth', 'N/A')
+    def section_divider():
+        elements.append(Spacer(1, 8))
+        elements.append(HRFlowable(width='100%', thickness=0.5, color=BORDER, spaceAfter=4))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # COVER
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Spacer(1, 60))
+    elements.append(HRFlowable(width='40%', thickness=2, color=BLUE, spaceAfter=16))
+    elements.append(Paragraph('Colorado Property', s_cover_title))
+    elements.append(Paragraph('Environmental &amp; Water Risk Report', s_cover_title))
+    elements.append(Spacer(1, 20))
+    elements.append(HRFlowable(width='20%', thickness=1, color=BORDER, spaceAfter=16))
+    elements.append(Paragraph(address, s_cover_addr))
+    elements.append(Paragraph(f'{lat:.5f}, {lng:.5f}', s_cover_meta))
+    elements.append(Spacer(1, 14))
+    elements.append(Paragraph(f'Generated {now_str}', s_cover_meta))
+    elements.append(Paragraph(f'Report ID: {report_id}', s_cover_meta))
+    elements.append(Spacer(1, 30))
+    elements.append(HRFlowable(width='60%', thickness=0.5, color=BORDER, spaceAfter=8))
+    elements.append(Paragraph('Water, Environmental &amp; Subsurface Risk Analysis', s_cover_sub))
+    elements.append(Paragraph('coloradowell.com', ParagraphStyle('url', parent=s_cover_meta, textColor=BLUE)))
+    elements.append(Spacer(1, 50))
+
+    # ── Precompute stats ──
+    avg_depth = area_stats.get('avg_depth')
+    min_depth = area_stats.get('min_depth')
+    max_depth = area_stats.get('max_depth')
     well_count = area_stats.get('total_nearby', 0)
-    min_depth = area_stats.get('min_depth', 'N/A')
-    max_depth = area_stats.get('max_depth', 'N/A')
-    hazard_count = area_stats.get('hazard_count', 0)
+    hazard_count = len(hazards)
 
-    cost_low = f"${int(float(avg_depth) * 50):,}" if isinstance(avg_depth, (int, float)) else 'N/A'
-    cost_high = f"${int(float(avg_depth) * 75):,}" if isinstance(avg_depth, (int, float)) else 'N/A'
-    avg_depth_str = f"{int(avg_depth)} ft" if isinstance(avg_depth, (int, float)) else 'N/A'
+    yields = [w['pump_yield_gpm'] for w in wells if w.get('pump_yield_gpm') and w['pump_yield_gpm'] > 0]
+    avg_yield = round(sum(yields) / len(yields), 1) if yields else None
 
-    stat_data = [
-        [Paragraph('Nearby Wells', stat_label), Paragraph('Avg Depth', stat_label),
-         Paragraph('Est. Cost', stat_label), Paragraph('Hazards', stat_label)],
-        [Paragraph(str(well_count), stat_value),
-         Paragraph(avg_depth_str, stat_value),
-         Paragraph(f"{cost_low}–{cost_high}" if cost_low != 'N/A' else 'N/A', stat_value),
-         Paragraph(str(hazard_count), ParagraphStyle('HazVal', parent=stat_value,
-             textColor=RED if hazard_count > 0 else GREEN))],
+    aquifer_set = set()
+    for w in wells:
+        if w.get('aquifers'):
+            for a in str(w['aquifers']).split(','):
+                a = a.strip()
+                if a and a != '\u2014':
+                    aquifer_set.add(a)
+    aquifer_list = sorted(aquifer_set)[:5]
+
+    risk_score = _compute_water_risk_score(hazards, radon_info)
+
+    def count_in_radius(items, radius):
+        return sum(1 for x in items if x.get('distance_miles', 99) <= radius)
+
+    wells_05 = count_in_radius(wells, 0.5)
+    wells_1 = count_in_radius(wells, 1.0)
+    wells_3 = count_in_radius(wells, 3.0)
+    haz_05 = count_in_radius(hazards, 0.5)
+    haz_1 = count_in_radius(hazards, 1.0)
+    haz_3 = count_in_radius(hazards, 3.0)
+
+    pfas_list = [h for h in hazards if h.get('_type') == 'pfas']
+    mine_list = [h for h in hazards if h.get('_type') == 'mine']
+    sf_list = [h for h in hazards if h.get('_type') == 'superfund']
+    bf_list = [h for h in hazards if h.get('_type') == 'brownfield']
+    tri_list = [h for h in hazards if h.get('_type') == 'tri']
+    epa_list = [h for h in hazards if h.get('_type') == 'epa']
+    rcra_list = [h for h in hazards if h.get('_type') == 'rcra']
+
+    nearest_haz = hazards[0] if hazards else None
+    nearest_haz_dist = f"{nearest_haz['distance_miles']:.1f}" if nearest_haz else None
+
+    def depth_class(d):
+        if d is None: return 'Unknown'
+        if d < 150: return 'Shallow'
+        if d < 400: return 'Moderate'
+        return 'Deep'
+
+    def yield_class(y):
+        if y is None: return 'Unknown'
+        if y >= 15: return 'Strong'
+        if y >= 5: return 'Good'
+        return 'Low'
+
+    pfas_near = count_in_radius(pfas_list, 3)
+    pfas_level = 'High' if count_in_radius(pfas_list, 1) > 0 else ('Moderate' if pfas_near > 2 else ('Low' if pfas_near > 0 else 'None Detected'))
+
+    mines_near = count_in_radius(mine_list, 3)
+    mine_level = 'High' if mines_near >= 5 else ('Elevated' if mines_near >= 2 else ('Low' if mines_near > 0 else 'None'))
+
+    cleanup_1mi = count_in_radius([h for h in hazards if h.get('_type') in ('superfund', 'epa', 'eparesponse', 'brownfield')], 1.0)
+    cleanup_label = f'{cleanup_1mi} site{"s" if cleanup_1mi != 1 else ""}' if cleanup_1mi > 0 else 'None within 1 mile'
+
+    radon_zone = radon_info.get('radon_zone', '\u2014') if radon_info else '\u2014'
+    radon_risk = radon_info.get('risk_level', 'Unknown') if radon_info else 'Unknown'
+
+    # ══════════════════════════════════════════════════════════════════════
+    # EXECUTIVE SUMMARY
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Paragraph('Executive Summary', s_section))
+    section_divider()
+
+    # Property Risk Snapshot grid
+    snap_items = [
+        ('Water Depth', depth_class(avg_depth), depth_class(avg_depth)),
+        ('Yield', yield_class(avg_yield), yield_class(avg_yield)),
+        ('PFAS Exposure', pfas_level, pfas_level),
+        ('Mine Density', mine_level, mine_level),
+        ('Cleanup Sites', cleanup_label, 'High' if cleanup_1mi > 0 else 'None'),
+        ('Radon Zone', str(radon_zone), 'High' if radon_zone == 1 else ('Moderate' if radon_zone == 2 else 'Low')),
     ]
-    stat_table = Table(stat_data, colWidths=[doc.width/4]*4)
-    stat_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
-        ('BOX', (0, 0), (-1, -1), 1, HexColor('#e0f2fe')),
+
+    snap_data = [[], []]
+    for label, value, rlevel in snap_items:
+        rc = risk_color_fn(rlevel)
+        snap_data[0].append(Paragraph(label, s_label))
+        snap_data[1].append(Paragraph(f'<font color="{rc.hexval()}">{value}</font>',
+            ParagraphStyle('sv_' + label, parent=s_body, alignment=TA_CENTER, fontName='Helvetica-Bold', fontSize=10)))
+
+    snap_table = Table(snap_data, colWidths=[pw/6]*6)
+    snap_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), ICE),
+        ('BOX', (0, 0), (-1, -1), 1, LIGHT_BLUE),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, LIGHT_BLUE),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, 0), 10),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 2),
-        ('TOPPADDING', (0, 1), (-1, 1), 2),
-        ('BOTTOMPADDING', (0, 1), (-1, 1), 10),
-        ('ROUNDEDCORNERS', [6, 6, 6, 6]),
+        ('TOPPADDING', (0, 0), (-1, 0), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 3),
+        ('TOPPADDING', (0, 1), (-1, 1), 3),
+        ('BOTTOMPADDING', (0, 1), (-1, 1), 8),
     ]))
-    elements.append(stat_table)
-    elements.append(Spacer(1, 16))
-
-    # ── Nearby Wells Table ──
-    elements.append(Paragraph('Nearby Well Records', heading_style))
-    elements.append(Paragraph(
-        f'Wells within 5 miles of the property, sorted by distance. '
-        f'Based on official state well permit records.', small_style))
-    elements.append(Spacer(1, 6))
-
-    if wells:
-        header = ['Distance', 'Depth', 'Water Lvl', 'Yield', 'Aquifer', 'County', 'Year']
-        table_data = [header]
-        for w in wells[:25]:  # Cap at 25 wells
-            dist = f"{w.get('distance_miles', 0):.1f} mi" if w.get('distance_miles') else '—'
-            depth = f"{int(w['depth_total'])} ft" if w.get('depth_total') else '—'
-            swl = f"{int(w['static_water_level'])} ft" if w.get('static_water_level') else '—'
-            yld = f"{w['pump_yield_gpm']} GPM" if w.get('pump_yield_gpm') else '—'
-            aq = (w.get('aquifers') or '—')[:20]
-            county = (w.get('county') or '—')[:15]
-            year = ''
-            if w.get('date_completed'):
-                try:
-                    year = str(w['date_completed'])[:4]
-                except Exception:
-                    year = '—'
-            table_data.append([dist, depth, swl, yld, aq, county, year or '—'])
-
-        col_widths = [0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 1.5*inch, 1.1*inch, 0.6*inch]
-        well_table = Table(table_data, colWidths=col_widths, repeatRows=1)
-        well_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), NAVY),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 8.5),
-            ('FONTSIZE', (0, 1), (-1, -1), 8),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        elements.append(well_table)
-    else:
-        elements.append(Paragraph('No well records found within 5 miles of this property.', body_style))
-
-    elements.append(Spacer(1, 16))
-
-    # ── Drilling Cost Estimate ──
-    elements.append(Paragraph('Drilling Cost Estimate', heading_style))
-    if isinstance(avg_depth, (int, float)) and avg_depth > 0:
-        elements.append(Paragraph(
-            f'Based on <b>{well_count} nearby wells</b> with an average depth of '
-            f'<b>{int(avg_depth)} ft</b>, using Colorado\'s typical rate of $50–$75 per foot:', body_style))
-        elements.append(Spacer(1, 6))
-
-        cost_data = [
-            ['Scenario', 'Depth', 'Cost @ $50/ft', 'Cost @ $75/ft'],
-            ['If shallow (minimum)', f"{int(min_depth)} ft",
-             f"${int(float(min_depth)*50):,}", f"${int(float(min_depth)*75):,}"],
-            ['Average for area', f"{int(avg_depth)} ft",
-             f"${int(float(avg_depth)*50):,}", f"${int(float(avg_depth)*75):,}"],
-            ['If deep (maximum)', f"{int(max_depth)} ft",
-             f"${int(float(max_depth)*50):,}", f"${int(float(max_depth)*75):,}"],
-        ]
-        cost_table = Table(cost_data, colWidths=[1.5*inch, 1.2*inch, 1.3*inch, 1.3*inch])
-        cost_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), DARK_BLUE),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
-            ('TOPPADDING', (0, 0), (-1, -1), 5),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ]))
-        elements.append(cost_table)
-    else:
-        elements.append(Paragraph(
-            'Insufficient depth data in the area to generate a cost estimate.', body_style))
-
-    elements.append(Spacer(1, 16))
-
-    # ── Environmental Hazard Scan ──
-    elements.append(Paragraph('Environmental Hazard Scan', heading_style))
-    elements.append(Paragraph(
-        'EPA contamination sites, Superfund, TRI toxic releases, PFAS \u201cforever chemicals,\u201d mine sites, '
-        'brownfields, RCRA hazardous waste, and federal facilities within 5 miles of the property.', small_style))
-    elements.append(Spacer(1, 6))
-
-    # ── Water Risk Score ──
-    risk_score = _compute_water_risk_score(hazards, radon_info)
-    risk_color = '#d50000' if risk_score >= 70 else '#ff6d00' if risk_score >= 40 else '#2e7d32'
-    risk_label = 'HIGH RISK' if risk_score >= 70 else 'MODERATE RISK' if risk_score >= 40 else 'LOW RISK'
-    risk_style = ParagraphStyle('RiskScore', parent=styles['Normal'],
-        fontSize=28, textColor=HexColor(risk_color), fontName='Helvetica-Bold', alignment=TA_CENTER)
-    risk_label_style = ParagraphStyle('RiskLabel', parent=styles['Normal'],
-        fontSize=11, textColor=HexColor(risk_color), fontName='Helvetica-Bold',
-        alignment=TA_CENTER, spaceAfter=4)
-    risk_desc_style = ParagraphStyle('RiskDesc', parent=styles['Normal'],
-        fontSize=9, textColor=GRAY, alignment=TA_CENTER)
-
-    risk_box_data = [
-        [Paragraph('WATER RISK SCORE', ParagraphStyle('RiskHead', parent=stat_label, alignment=TA_CENTER))],
-        [Paragraph(str(risk_score), risk_style)],
-        [Paragraph(risk_label, risk_label_style)],
-        [Paragraph(f'{len(hazards)} hazard site{"s" if len(hazards) != 1 else ""} within 5 miles', risk_desc_style)],
-    ]
-    risk_table = Table(risk_box_data, colWidths=[3*inch])
-    risk_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
-        ('BOX', (0, 0), (-1, -1), 2, HexColor(risk_color)),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(risk_table)
+    elements.append(snap_table)
     elements.append(Spacer(1, 12))
 
-    HAZARD_TYPE_LABELS = {
-        'epa': 'EPA Site', 'superfund': 'Superfund', 'tri': 'TRI Facility',
-        'brownfield': 'Brownfield', 'pfas': 'PFAS Site', 'mine': 'Mine Site',
-        'rcra': 'RCRA Facility', 'fedfac': 'Federal Facility', 'eparesponse': 'EPA Response',
-    }
+    # Risk Score compact row
+    rs_color = RED if risk_score >= 70 else AMBER if risk_score >= 40 else GREEN
+    rs_label = 'HIGH RISK' if risk_score >= 70 else 'MODERATE RISK' if risk_score >= 40 else 'LOW RISK'
+    rs_bg = L_RED if risk_score >= 70 else L_AMBER if risk_score >= 40 else L_GREEN
 
-    if hazards:
-        haz_header = ['Type', 'Name', 'Distance', 'Detail']
-        haz_data = [haz_header]
-        for h in hazards[:20]:
-            htype = HAZARD_TYPE_LABELS.get(h.get('_type'), 'Hazard')
-            name = (h.get('site_name') or h.get('facility_name') or '—')[:35]
-            dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '—'
-            detail = (h.get('npl_status') or h.get('category') or h.get('contaminant') or h.get('mine_type') or '—')[:25]
-            haz_data.append([htype, name, dist, detail])
+    score_data = [[
+        Paragraph('WATER RISK SCORE', ParagraphStyle('rsh', parent=s_label, fontSize=7)),
+        Paragraph(str(risk_score), ParagraphStyle('rsv', parent=s_value, fontSize=22, textColor=rs_color)),
+        Paragraph(rs_label, ParagraphStyle('rsl', parent=s_body, fontName='Helvetica-Bold', textColor=rs_color, fontSize=10, alignment=TA_CENTER)),
+    ]]
+    score_tbl = Table(score_data, colWidths=[1.4*inch, 1*inch, 2*inch])
+    score_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), rs_bg),
+        ('BOX', (0, 0), (-1, -1), 1.5, rs_color),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(score_tbl)
+    elements.append(Spacer(1, 12))
 
-        haz_table = Table(haz_data, colWidths=[1.1*inch, 2.3*inch, 0.8*inch, 1.8*inch], repeatRows=1)
-        haz_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), RED),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#fef2f2')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#fca5a5')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        elements.append(haz_table)
-    else:
-        elements.append(Paragraph(
-            '<font color="#22c55e">&#10003;</font> <b>No contamination sites found within 5 miles — low environmental risk.</b>',
-            body_style))
+    # Interpretation paragraph
+    depth_str = f"{int(avg_depth)} ft" if avg_depth else "insufficient data"
+    interp_parts = []
+    interp_parts.append(
+        f'This property shows <b>{depth_class(avg_depth).lower()}</b> drilling depth variability '
+        f'based on <b>{well_count} nearby wells</b> within a 5-mile radius'
+        + (f' (average depth: {depth_str}).' if avg_depth else '.')
+    )
 
-    # ── PFAS Detail Section ──
-    pfas_sites = [h for h in hazards if h.get('_type') == 'pfas']
-    if pfas_sites:
-        elements.append(Spacer(1, 10))
-        elements.append(Paragraph('PFAS "Forever Chemical" Sites', ParagraphStyle('PFASHead',
-            parent=heading_style, textColor=HexColor('#9c27b0'))))
-        elements.append(Paragraph(
-            'Per- and polyfluoroalkyl substances (PFAS) are persistent chemicals linked to cancer, '
-            'thyroid disease, and immune system damage. They do not break down in the environment.',
-            small_style))
-        elements.append(Spacer(1, 4))
-        pfas_data = [['Site', 'Source Type', 'Distance', 'Contaminant']]
-        for p in pfas_sites[:10]:
-            pfas_data.append([
-                (p.get('site_name') or '—')[:30],
-                (p.get('source_type') or '—')[:20],
-                f"{p.get('distance_miles', 0):.1f} mi",
-                (p.get('contaminant') or 'PFAS')[:20],
-            ])
-        pfas_tbl = Table(pfas_data, colWidths=[2*inch, 1.3*inch, 0.8*inch, 1.5*inch], repeatRows=1)
-        pfas_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#9c27b0')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#f3e5f5')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#ce93d8')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        elements.append(pfas_tbl)
-
-    # ── Mine Sites Detail Section ──
-    mine_sites = [h for h in hazards if h.get('_type') == 'mine']
-    if mine_sites:
-        elements.append(Spacer(1, 10))
-        elements.append(Paragraph('Nearby Mine Sites', ParagraphStyle('MineHead',
-            parent=heading_style, textColor=HexColor('#6d4c41'))))
-        elements.append(Paragraph(
-            'Abandoned mines can leach heavy metals (arsenic, lead, cadmium) into groundwater. '
-            'Active mines may impact water table levels and quality.',
-            small_style))
-        elements.append(Spacer(1, 4))
-        mine_data = [['Mine Name', 'Type', 'Distance', 'County']]
-        for m in mine_sites[:10]:
-            mine_data.append([
-                (m.get('site_name') or '—')[:30],
-                (m.get('mine_type') or '—')[:20],
-                f"{m.get('distance_miles', 0):.1f} mi",
-                (m.get('county') or '—')[:15],
-            ])
-        mine_tbl = Table(mine_data, colWidths=[2.2*inch, 1.3*inch, 0.8*inch, 1.3*inch], repeatRows=1)
-        mine_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#6d4c41')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#efebe9')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#bcaaa4')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        elements.append(mine_tbl)
-
-    # ── Brownfield Detail Section ──
-    bf_sites = [h for h in hazards if h.get('_type') == 'brownfield']
-    if bf_sites:
-        elements.append(Spacer(1, 10))
-        elements.append(Paragraph('Brownfield Sites', ParagraphStyle('BFHead',
-            parent=heading_style, textColor=HexColor('#e65100'))))
-        elements.append(Paragraph(
-            'Brownfields are former industrial or commercial properties where soil and groundwater '
-            'may be contaminated. Cleanup status affects nearby water safety.',
-            small_style))
-        elements.append(Spacer(1, 4))
-        bf_data = [['Site', 'City', 'Distance', 'Cleanup']]
-        for b in bf_sites[:10]:
-            cleanup = 'Yes' if b.get('cleanup_ind') else 'No'
-            bf_data.append([
-                (b.get('site_name') or '—')[:30],
-                (b.get('city') or '—')[:15],
-                f"{b.get('distance_miles', 0):.1f} mi",
-                cleanup,
-            ])
-        bf_tbl = Table(bf_data, colWidths=[2.2*inch, 1.3*inch, 0.8*inch, 1.3*inch], repeatRows=1)
-        bf_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#e65100')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#fff3e0')]),
-            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#ffab91')),
-            ('TOPPADDING', (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ]))
-        elements.append(bf_tbl)
-
-    # ── Radon Zone Info ──
-    if radon_info:
-        elements.append(Spacer(1, 10))
-        zone = radon_info.get('radon_zone', '?')
-        risk = radon_info.get('risk_level', 'Unknown')
-        county = radon_info.get('county', 'Unknown')
-        level = radon_info.get('predicted_level', '')
-        zone_color = '#d50000' if zone == 1 else '#ff6d00' if zone == 2 else '#2e7d32'
-        radon_text = (
-            f'<b>Radon Zone {zone}</b> — {county} County<br/>'
-            f'Risk Level: <b>{risk}</b>'
-            + (f' | Predicted: {level}' if level else '')
-            + '<br/><i>EPA recommends radon testing for all homes, especially in Zone 1 (highest risk).</i>'
+    if sf_list:
+        nearest_sf = min(sf_list, key=lambda x: x.get('distance_miles', 99))
+        interp_parts.append(
+            f' <b>{len(sf_list)} EPA Superfund site{"s" if len(sf_list) != 1 else ""}</b>'
+            f' {"are" if len(sf_list) != 1 else "is"} located within 5 miles'
+            f' (nearest: {nearest_sf["distance_miles"]:.1f} miles).'
         )
-        elements.append(Paragraph(radon_text, body_style))
+    else:
+        interp_parts.append(' No major EPA Superfund sites are located within 5 miles.')
 
-    elements.append(Spacer(1, 20))
+    if mine_list:
+        nearest_mine = min(mine_list, key=lambda x: x.get('distance_miles', 99))
+        interp_parts.append(
+            f' Historical mining activity is present \u2014 <b>{len(mine_list)} mine site{"s" if len(mine_list) != 1 else ""}</b>'
+            f' within {nearest_mine["distance_miles"]:.1f} miles.'
+        )
 
-    # ── Depth Distribution ──
+    if pfas_list:
+        nearest_pfas = min(pfas_list, key=lambda x: x.get('distance_miles', 99))
+        interp_parts.append(
+            f' <b>{len(pfas_list)} PFAS detection{"s" if len(pfas_list) != 1 else ""}</b>'
+            f' recorded within 5 miles (nearest: {nearest_pfas["distance_miles"]:.1f} mi).'
+            f' PFAS are persistent contaminants that do not break down in groundwater.'
+        )
+
+    if radon_info and radon_zone in (1, 2):
+        interp_parts.append(
+            f' The property falls in <b>EPA Radon Zone {radon_zone}</b>'
+            f' ({radon_risk} risk) \u2014 radon testing is recommended.'
+        )
+
+    elements.append(Paragraph(''.join(interp_parts), s_interp))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # WATER INTELLIGENCE
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Paragraph('Water Intelligence', s_section))
+    section_divider()
+
+    avg_d_str = f"{int(avg_depth)} ft" if avg_depth else 'N/A'
+    min_d_str = f"{int(min_depth)} ft" if min_depth else '\u2014'
+    max_d_str = f"{int(max_depth)} ft" if max_depth else '\u2014'
+    yield_str = f"{avg_yield} GPM" if avg_yield else 'N/A'
+    cost_lo = f"${int(avg_depth * 50):,}" if avg_depth else '\u2014'
+    cost_hi = f"${int(avg_depth * 75):,}" if avg_depth else '\u2014'
+
+    water_data = [
+        [Paragraph('Avg Depth', s_label), Paragraph('Depth Range', s_label),
+         Paragraph('Avg Yield', s_label), Paragraph('Est. Cost', s_label),
+         Paragraph('Wells Found', s_label)],
+        [Paragraph(avg_d_str, ParagraphStyle('wv1', parent=s_value, fontSize=13)),
+         Paragraph(f'{min_d_str} \u2013 {max_d_str}', ParagraphStyle('wv2', parent=s_body, alignment=TA_CENTER, fontName='Helvetica-Bold', fontSize=9)),
+         Paragraph(yield_str, ParagraphStyle('wv3', parent=s_value, fontSize=13)),
+         Paragraph(f'{cost_lo} \u2013 {cost_hi}', ParagraphStyle('wv4', parent=s_body, alignment=TA_CENTER, fontName='Helvetica-Bold', fontSize=9)),
+         Paragraph(str(well_count), ParagraphStyle('wv5', parent=s_value, fontSize=13))],
+    ]
+    wt = Table(water_data, colWidths=[pw/5]*5)
+    wt.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), ICE),
+        ('BOX', (0, 0), (-1, -1), 0.5, BORDER),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, BORDER),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, 0), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 2),
+        ('TOPPADDING', (0, 1), (-1, 1), 2),
+        ('BOTTOMPADDING', (0, 1), (-1, 1), 8),
+    ]))
+    elements.append(wt)
+    elements.append(Spacer(1, 6))
+
+    if aquifer_list:
+        elements.append(Paragraph(f'<b>Aquifer types in area:</b> {", ".join(aquifer_list)}', s_body))
+    elements.append(Spacer(1, 8))
+
+    # Depth distribution
     if wells:
-        elements.append(Paragraph('Area Well Depth Distribution', heading_style))
         shallow = sum(1 for w in wells if w.get('depth_total') and w['depth_total'] < 200)
         medium = sum(1 for w in wells if w.get('depth_total') and 200 <= w['depth_total'] < 500)
         deep_ = sum(1 for w in wells if w.get('depth_total') and w['depth_total'] >= 500)
         total_w = len([w for w in wells if w.get('depth_total')])
-
         if total_w > 0:
-            dist_data = [
-                ['Depth Range', 'Count', 'Percentage'],
+            elements.append(Paragraph('Well Depth Distribution', s_subsection))
+            dd = [
+                ['Depth Range', 'Count', '%'],
                 ['Under 200 ft (shallow)', str(shallow), f"{shallow/total_w*100:.0f}%"],
-                ['200–500 ft (moderate)', str(medium), f"{medium/total_w*100:.0f}%"],
+                ['200\u2013500 ft (moderate)', str(medium), f"{medium/total_w*100:.0f}%"],
                 ['Over 500 ft (deep)', str(deep_), f"{deep_/total_w*100:.0f}%"],
             ]
-            dist_table = Table(dist_data, colWidths=[2.5*inch, 1.2*inch, 1.2*inch])
-            dist_table.setStyle(TableStyle([
+            dd_tbl = Table(dd, colWidths=[2.5*inch, 0.8*inch, 0.8*inch])
+            dd_tbl.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), NAVY),
                 ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('FONTSIZE', (0, 0), (-1, -1), 8.5),
                 ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_BG]),
-                ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#cbd5e1')),
-                ('TOPPADDING', (0, 0), (-1, -1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
+                ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ]))
-            elements.append(dist_table)
-            elements.append(Spacer(1, 16))
+            elements.append(dd_tbl)
+            elements.append(Spacer(1, 8))
 
-    # ── Footer / Disclaimer ──
-    elements.append(HRFlowable(width='100%', thickness=1, color=HexColor('#e2e8f0'), spaceAfter=8))
-    elements.append(Paragraph(
-        '<b>Disclaimer:</b> This report is based on publicly available state well permit records and EPA data. '
-        'Well depths and water levels vary by location and geology. Actual drilling costs depend on driller, '
-        'terrain, rock type, and permit requirements. This report is for informational purposes only and does '
-        'not constitute professional geological or engineering advice. Consult a licensed well driller for '
-        'site-specific estimates.', small_style))
+    # Nearby wells table (top 15)
+    if wells:
+        elements.append(Paragraph('Nearby Well Records', s_subsection))
+        elements.append(Paragraph('Official state well permit records, sorted by distance.', s_body_sm))
+        elements.append(Spacer(1, 3))
+        wh = ['Dist.', 'Depth', 'Water Lvl', 'Yield', 'Aquifer', 'Year']
+        wd = [wh]
+        for w in wells[:15]:
+            dist = f"{w.get('distance_miles', 0):.1f} mi" if w.get('distance_miles') else '\u2014'
+            depth = f"{int(w['depth_total'])} ft" if w.get('depth_total') else '\u2014'
+            swl = f"{int(w['static_water_level'])} ft" if w.get('static_water_level') else '\u2014'
+            yld = f"{w['pump_yield_gpm']} GPM" if w.get('pump_yield_gpm') else '\u2014'
+            aq = (w.get('aquifers') or '\u2014')[:18]
+            yr = str(w.get('date_completed', ''))[:4] if w.get('date_completed') else '\u2014'
+            wd.append([dist, depth, swl, yld, aq, yr])
+
+        well_tbl = Table(wd, colWidths=[0.65*inch, 0.65*inch, 0.7*inch, 0.65*inch, 1.6*inch, 0.5*inch], repeatRows=1)
+        well_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), SLATE),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 7.5),
+            ('FONTSIZE', (0, 1), (-1, -1), 7.5),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
+            ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        elements.append(well_tbl)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # DRILLING COST ESTIMATE
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Paragraph('Drilling Cost Estimate', s_section))
+    section_divider()
+
+    if isinstance(avg_depth, (int, float)) and avg_depth > 0:
+        elements.append(Paragraph(
+            f'Based on <b>{well_count} nearby wells</b> with depth data, '
+            f'using Colorado\'s typical drilling rate of <b>$50\u2013$75 per foot</b>:', s_body))
+        elements.append(Spacer(1, 6))
+
+        cd = [
+            ['Scenario', 'Est. Depth', 'Cost @ $50/ft', 'Cost @ $75/ft'],
+            ['Shallow (minimum)', f"{int(min_depth)} ft", f"${int(min_depth*50):,}", f"${int(min_depth*75):,}"],
+            ['Average for area', f"{int(avg_depth)} ft", f"${int(avg_depth*50):,}", f"${int(avg_depth*75):,}"],
+            ['Deep (maximum)', f"{int(max_depth)} ft", f"${int(max_depth*50):,}", f"${int(max_depth*75):,}"],
+        ]
+        cost_tbl = Table(cd, colWidths=[1.4*inch, 1.1*inch, 1.2*inch, 1.2*inch])
+        cost_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), BLUE),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, ICE]),
+            ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        elements.append(cost_tbl)
+        elements.append(Spacer(1, 4))
+        elements.append(Paragraph(
+            '<i>Note: Actual costs vary by driller, terrain, rock type, casing, and permit requirements. '
+            'Pump, pressure tank, and hookup add $3,000\u2013$8,000.</i>', s_body_sm))
+    else:
+        elements.append(Paragraph('Insufficient well depth data to generate a cost estimate for this area.', s_body))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ENVIRONMENTAL EXPOSURE
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Paragraph('Environmental Exposure Analysis', s_section))
+    section_divider()
+
+    # Proximity Radius Summary
+    elements.append(Paragraph('Proximity Radius Summary', s_subsection))
+
+    type_groups = [
+        ('EPA / Cleanup', [h for h in hazards if h.get('_type') in ('epa', 'eparesponse', 'brownfield')]),
+        ('Superfund (NPL)', sf_list),
+        ('PFAS Detections', pfas_list),
+        ('TRI Facilities', tri_list),
+        ('Mine Sites', mine_list),
+        ('RCRA Haz. Waste', rcra_list),
+    ]
+
+    prox_header = ['Hazard Type', '< 0.5 mi', '< 1 mi', '< 3 mi', '< 5 mi', 'Nearest']
+    prox_data = [prox_header]
+    for label, items in type_groups:
+        c05 = count_in_radius(items, 0.5)
+        c1 = count_in_radius(items, 1.0)
+        c3 = count_in_radius(items, 3.0)
+        c5 = len(items)
+        nearest = f"{min(items, key=lambda x: x.get('distance_miles', 99))['distance_miles']:.1f} mi" if items else '\u2014'
+        prox_data.append([label, str(c05) if c05 else '\u2014', str(c1) if c1 else '\u2014',
+                         str(c3) if c3 else '\u2014', str(c5) if c5 else '\u2014', nearest])
+
+    prox_data.append([
+        'ALL HAZARDS',
+        str(haz_05) if haz_05 else '\u2014', str(haz_1) if haz_1 else '\u2014',
+        str(haz_3) if haz_3 else '\u2014', str(hazard_count) if hazard_count else '\u2014',
+        f'{nearest_haz_dist} mi' if nearest_haz_dist else '\u2014'
+    ])
+
+    prox_tbl = Table(prox_data, colWidths=[1.3*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.8*inch], repeatRows=1)
+    prox_styles = [
+        ('BACKGROUND', (0, 0), (-1, 0), NAVY),
+        ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
+        ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+        ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2), [WHITE, LGRAY]),
+        ('BACKGROUND', (0, -1), (-1, -1), L_RED),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]
+    for row_idx in range(1, len(prox_data)):
+        for col_idx in [1, 2]:
+            val = prox_data[row_idx][col_idx]
+            if val != '\u2014' and val != '0':
+                prox_styles.append(('TEXTCOLOR', (col_idx, row_idx), (col_idx, row_idx), RED))
+                prox_styles.append(('FONTNAME', (col_idx, row_idx), (col_idx, row_idx), 'Helvetica-Bold'))
+    prox_tbl.setStyle(TableStyle(prox_styles))
+    elements.append(prox_tbl)
+    elements.append(Spacer(1, 10))
+
+    # Hazard subsection helper
+    def hazard_subsection(title, title_color, items, detail_fn, interp_text, bg_color):
+        if not items:
+            return
+        elements.append(Paragraph(title, ParagraphStyle('HS_' + title[:8], parent=s_subsection, textColor=title_color)))
+        elements.append(Paragraph(interp_text, s_interp))
+        rows = [['Site Name', 'Distance', 'Detail']]
+        for h in items[:8]:
+            name = (h.get('site_name') or h.get('facility_name') or '\u2014')[:35]
+            dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '\u2014'
+            detail = detail_fn(h)
+            rows.append([name, dist, detail])
+        tbl = Table(rows, colWidths=[2.4*inch, 0.7*inch, 1.8*inch], repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), title_color),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7.5),
+            ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, bg_color]),
+            ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        elements.append(tbl)
+        elements.append(Spacer(1, 6))
+
+    # EPA & Cleanup
+    epa_bf = [h for h in hazards if h.get('_type') in ('epa', 'eparesponse', 'brownfield')]
+    if epa_bf:
+        nearest_epa = min(epa_bf, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(epa_bf)} EPA-tracked cleanup or brownfield site{"s" if len(epa_bf) != 1 else ""} '
+            f'within 5 miles. Nearest is {nearest_epa["distance_miles"]:.1f} miles from the property.'
+            + (' No sites within 1 mile.' if count_in_radius(epa_bf, 1) == 0 else
+               f' {count_in_radius(epa_bf, 1)} site{"s" if count_in_radius(epa_bf, 1) != 1 else ""} within 1 mile \u2014 elevated groundwater risk.')
+        )
+        hazard_subsection('EPA &amp; Cleanup Sites', RED, epa_bf,
+            lambda h: (h.get('npl_status') or h.get('category') or '\u2014')[:25], interp, L_RED)
+
+    # Superfund
+    if sf_list:
+        nearest_sf = min(sf_list, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(sf_list)} National Priorities List (Superfund) site{"s" if len(sf_list) != 1 else ""} '
+            f'within 5 miles (nearest: {nearest_sf["distance_miles"]:.1f} mi). '
+            f'Superfund sites represent the most serious contamination threats and can affect '
+            f'groundwater quality for decades.'
+        )
+        hazard_subsection('Superfund Sites', HexColor('#b91c1c'), sf_list,
+            lambda h: (h.get('npl_status') or '\u2014')[:25], interp, L_RED)
+
+    # PFAS
+    if pfas_list:
+        nearest_pfas = min(pfas_list, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(pfas_list)} PFAS "forever chemical" detection{"s" if len(pfas_list) != 1 else ""} '
+            f'within 5 miles (nearest: {nearest_pfas["distance_miles"]:.1f} mi). '
+            f'PFAS are persistent chemicals linked to cancer, thyroid disease, and immune disorders. '
+            f'They do not break down in soil or groundwater.'
+        )
+        hazard_subsection('PFAS "Forever Chemical" Detections', PURPLE, pfas_list,
+            lambda h: (h.get('contaminant') or h.get('source_type') or 'PFAS')[:25], interp, L_PURPLE)
+
+    # TRI
+    if tri_list:
+        nearest_tri = min(tri_list, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(tri_list)} Toxic Release Inventory facilit{"ies" if len(tri_list) != 1 else "y"} '
+            f'within 5 miles (nearest: {nearest_tri["distance_miles"]:.1f} mi). '
+            f'TRI facilities report annual chemical releases to air, water, and land.'
+        )
+        hazard_subsection('TRI Toxic Release Facilities', AMBER, tri_list,
+            lambda h: (h.get('category') or '\u2014')[:25], interp, L_AMBER)
+
+    # Mines
+    if mine_list:
+        nearest_mine = min(mine_list, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(mine_list)} mine site{"s" if len(mine_list) != 1 else ""} '
+            f'within 5 miles (nearest: {nearest_mine["distance_miles"]:.1f} mi). '
+            f'Abandoned mines can leach arsenic, lead, and cadmium into groundwater. '
+            + ('No documented acid mine drainage reports tied to this parcel.'
+               if count_in_radius(mine_list, 1) == 0 else
+               f'{count_in_radius(mine_list, 1)} mine{"s" if count_in_radius(mine_list, 1) != 1 else ""} within 1 mile \u2014 groundwater testing recommended.')
+        )
+        hazard_subsection('Mine Sites', HexColor('#78350f'), mine_list,
+            lambda h: (h.get('mine_type') or h.get('county') or '\u2014')[:25], interp, L_BROWN)
+
+    # RCRA
+    if rcra_list:
+        nearest_rcra = min(rcra_list, key=lambda x: x.get('distance_miles', 99))
+        interp = (
+            f'{len(rcra_list)} RCRA hazardous waste facilit{"ies" if len(rcra_list) != 1 else "y"} '
+            f'within 5 miles (nearest: {nearest_rcra["distance_miles"]:.1f} mi). '
+            f'RCRA facilities handle, treat, or dispose of hazardous waste under federal regulation.'
+        )
+        hazard_subsection('RCRA Hazardous Waste', HexColor('#c2410c'), rcra_list,
+            lambda h: (h.get('category') or '\u2014')[:25], interp, L_AMBER)
+
+    # No hazards
+    if not hazards:
+        elements.append(Spacer(1, 8))
+        elements.append(Paragraph(
+            '<font color="#16a34a"><b>No contamination sites found within 5 miles</b></font> \u2014 this property '
+            'shows low environmental exposure risk based on available EPA, state, and federal databases.',
+            s_body))
+
+    # Radon
+    if radon_info:
+        elements.append(Paragraph('Radon Risk', s_subsection))
+        zone = radon_info.get('radon_zone', '\u2014')
+        rr = radon_info.get('risk_level', 'Unknown')
+        rc_name = radon_info.get('county', 'Unknown')
+        pred = radon_info.get('predicted_level', '')
+        z_color = RED if zone == 1 else AMBER if zone == 2 else GREEN
+        radon_data = [[
+            Paragraph(f'<b>Zone {zone}</b>', ParagraphStyle('rz', parent=s_body, textColor=z_color, fontSize=14, fontName='Helvetica-Bold', alignment=TA_CENTER)),
+            Paragraph(f'<b>{rc_name} County</b><br/>Risk: {rr}' + (f' | {pred}' if pred else ''), s_body),
+            Paragraph('EPA recommends radon testing for all homes. Zone 1 = highest risk (>4 pCi/L predicted).', s_body_sm),
+        ]]
+        radon_tbl = Table(radon_data, colWidths=[1*inch, 2*inch, 2.5*inch])
+        radon_tbl.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.5, BORDER),
+            ('BACKGROUND', (0, 0), (0, 0), LGRAY),
+            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        elements.append(radon_tbl)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # DATA SOURCES & DISCLAIMER
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Spacer(1, 20))
+    elements.append(HRFlowable(width='100%', thickness=0.5, color=BORDER, spaceAfter=8))
+    elements.append(Paragraph('Data Sources &amp; Disclaimer', ParagraphStyle('DiscHead',
+        parent=s_subsection, fontSize=9, textColor=GRAY)))
+    elements.append(Spacer(1, 4))
+
+    sources = [
+        'Colorado Division of Water Resources \u2014 Well Permit Database',
+        'U.S. EPA Envirofacts \u2014 SEMS, Superfund, TRI, RCRA, Brownfields',
+        'U.S. EPA \u2014 PFAS Analytic Tools &amp; Detection Data',
+        'Colorado Division of Reclamation, Mining &amp; Safety \u2014 Mine Site Inventory',
+        'U.S. EPA \u2014 Radon Zone Classification (county-level)',
+        'USGS National Water Information System',
+    ]
+    for src in sources:
+        elements.append(Paragraph(f'  \u2022  {src}', s_disclaimer))
+
     elements.append(Spacer(1, 8))
     elements.append(Paragraph(
-        f'© {datetime.now().year} Colorado Well Finder — coloradowell.com', 
-        ParagraphStyle('Footer', parent=small_style, alignment=TA_CENTER, textColor=BLUE)))
+        '<b>Disclaimer:</b> This report is generated from publicly available federal and state databases '
+        'and is provided for informational purposes only. It does not constitute professional geological, '
+        'environmental, or engineering advice. Well depths, water quality, and contamination risks vary '
+        'by precise location and geology. Consult a licensed well driller and environmental professional '
+        'for site-specific assessments before making land purchase or drilling decisions.',
+        s_disclaimer))
+    elements.append(Spacer(1, 12))
+    elements.append(HRFlowable(width='30%', thickness=0.5, color=BORDER, spaceAfter=6))
+    elements.append(Paragraph(
+        f'\u00a9 {datetime.now().year} Colorado Well Finder  \u2014  coloradowell.com  \u2014  Report {report_id}',
+        ParagraphStyle('FinalFooter', parent=s_footer, textColor=BLUE)))
 
     doc.build(elements)
     buf.seek(0)
