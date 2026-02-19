@@ -1198,27 +1198,9 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         elements.append(HRFlowable(width='100%', thickness=0.5, color=BORDER, spaceAfter=4))
 
     # ══════════════════════════════════════════════════════════════════════
-    # COVER
+    # PRECOMPUTE STATS (needed for cover gauge)
     # ══════════════════════════════════════════════════════════════════════
 
-    elements.append(Spacer(1, 60))
-    elements.append(HRFlowable(width='40%', thickness=2, color=BLUE, spaceAfter=16))
-    elements.append(Paragraph('Colorado Property', s_cover_title))
-    elements.append(Paragraph('Environmental &amp; Water Risk Report', s_cover_title))
-    elements.append(Spacer(1, 20))
-    elements.append(HRFlowable(width='20%', thickness=1, color=BORDER, spaceAfter=16))
-    elements.append(Paragraph(address, s_cover_addr))
-    elements.append(Paragraph(f'{lat:.5f}, {lng:.5f}', s_cover_meta))
-    elements.append(Spacer(1, 14))
-    elements.append(Paragraph(f'Generated {now_str}', s_cover_meta))
-    elements.append(Paragraph(f'Report ID: {report_id}', s_cover_meta))
-    elements.append(Spacer(1, 30))
-    elements.append(HRFlowable(width='60%', thickness=0.5, color=BORDER, spaceAfter=8))
-    elements.append(Paragraph('Water, Environmental &amp; Subsurface Risk Analysis', s_cover_sub))
-    elements.append(Paragraph('coloradowell.com', ParagraphStyle('url', parent=s_cover_meta, textColor=BLUE)))
-    elements.append(Spacer(1, 50))
-
-    # ── Precompute stats ──
     avg_depth = area_stats.get('avg_depth')
     min_depth = area_stats.get('min_depth')
     max_depth = area_stats.get('max_depth')
@@ -1285,6 +1267,199 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     radon_risk = radon_info.get('risk_level', 'Unknown') if radon_info else 'Unknown'
 
     # ══════════════════════════════════════════════════════════════════════
+    # GAUGE FLOWABLE — semicircular speedometer for risk score
+    # ══════════════════════════════════════════════════════════════════════
+
+    from reportlab.platypus import Flowable as _Flowable
+    import math as _math
+
+    class RiskGauge(_Flowable):
+        """Draws a semicircular speedometer gauge for 0-100 risk score."""
+        def __init__(self, score, width=220, height=135):
+            _Flowable.__init__(self)
+            self.score = max(0, min(100, score))
+            self.width = width
+            self.height = height
+
+        def draw(self):
+            c = self.canv
+            cx = self.width / 2
+            cy = 30  # center of arc (bottom half)
+            r_outer = 95
+            r_inner = 65
+
+            # Draw arc segments: green -> yellow -> orange -> red
+            arc_colors = [
+                (0, 25,   HexColor('#22c55e')),  # green
+                (25, 45,  HexColor('#84cc16')),   # lime
+                (45, 60,  HexColor('#eab308')),   # yellow
+                (60, 75,  HexColor('#f97316')),   # orange
+                (75, 100, HexColor('#ef4444')),    # red
+            ]
+
+            for lo, hi, color in arc_colors:
+                a_start = 180 - (lo / 100) * 180
+                a_end = 180 - (hi / 100) * 180
+                # Draw thick arc via filled wedge pairs
+                c.saveState()
+                c.setFillColor(color)
+                c.setStrokeColor(color)
+                # Outer arc
+                p = c.beginPath()
+                # Walk the arc in small steps
+                steps = max(int((a_start - a_end) / 2), 4)
+                for i in range(steps + 1):
+                    angle = _math.radians(a_start - (a_start - a_end) * i / steps)
+                    x = cx + r_outer * _math.cos(angle)
+                    y = cy + r_outer * _math.sin(angle)
+                    if i == 0:
+                        p.moveTo(x, y)
+                    else:
+                        p.lineTo(x, y)
+                # Inner arc (reverse)
+                for i in range(steps + 1):
+                    angle = _math.radians(a_end + (a_start - a_end) * i / steps)
+                    x = cx + r_inner * _math.cos(angle)
+                    y = cy + r_inner * _math.sin(angle)
+                    p.lineTo(x, y)
+                p.close()
+                c.drawPath(p, fill=1, stroke=0)
+                c.restoreState()
+
+            # Tick marks at 0, 25, 50, 75, 100
+            c.setStrokeColor(HexColor('#0a1628'))
+            c.setLineWidth(1.5)
+            for val in [0, 25, 50, 75, 100]:
+                angle = _math.radians(180 - (val / 100) * 180)
+                x1 = cx + (r_outer + 2) * _math.cos(angle)
+                y1 = cy + (r_outer + 2) * _math.sin(angle)
+                x2 = cx + (r_outer + 8) * _math.cos(angle)
+                y2 = cy + (r_outer + 8) * _math.sin(angle)
+                c.line(x1, y1, x2, y2)
+
+            # Tick labels
+            c.setFont('Helvetica', 7)
+            c.setFillColor(HexColor('#64748b'))
+            for val, nudge_x, nudge_y in [(0, -8, -2), (25, -6, 6), (50, -4, 8), (75, 0, 6), (100, -2, -2)]:
+                angle = _math.radians(180 - (val / 100) * 180)
+                x = cx + (r_outer + 16) * _math.cos(angle) + nudge_x
+                y = cy + (r_outer + 16) * _math.sin(angle) + nudge_y
+                c.drawString(x, y, str(val))
+
+            # Needle
+            needle_angle = _math.radians(180 - (self.score / 100) * 180)
+            needle_len = r_inner - 8
+            nx = cx + needle_len * _math.cos(needle_angle)
+            ny = cy + needle_len * _math.sin(needle_angle)
+
+            # Needle body (tapered)
+            c.setStrokeColor(HexColor('#0a1628'))
+            c.setLineWidth(2.5)
+            c.line(cx, cy, nx, ny)
+
+            # Needle hub
+            c.setFillColor(HexColor('#0a1628'))
+            c.circle(cx, cy, 6, fill=1, stroke=0)
+            c.setFillColor(HexColor('#ffffff'))
+            c.circle(cx, cy, 3, fill=1, stroke=0)
+
+            # Score text centered below
+            rs_color = HexColor('#dc2626') if self.score >= 70 else HexColor('#d97706') if self.score >= 40 else HexColor('#16a34a')
+            c.setFont('Helvetica-Bold', 28)
+            c.setFillColor(rs_color)
+            score_text = str(self.score)
+            tw = c.stringWidth(score_text, 'Helvetica-Bold', 28)
+            c.drawString(cx - tw / 2, cy - 28, score_text)
+
+            # Label below score
+            rs_label = 'HIGH RISK' if self.score >= 70 else 'MODERATE' if self.score >= 40 else 'LOW RISK'
+            c.setFont('Helvetica-Bold', 8)
+            c.setFillColor(rs_color)
+            lw = c.stringWidth(rs_label, 'Helvetica-Bold', 8)
+            c.drawString(cx - lw / 2, cy - 40, rs_label)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # COVER PAGE
+    # ══════════════════════════════════════════════════════════════════════
+
+    elements.append(Spacer(1, 36))
+    elements.append(HRFlowable(width='35%', thickness=2, color=BLUE, spaceAfter=14))
+    elements.append(Paragraph('Colorado Property', s_cover_title))
+    elements.append(Paragraph('Environmental &amp; Water Risk Report', s_cover_title))
+    elements.append(Spacer(1, 14))
+    elements.append(HRFlowable(width='18%', thickness=0.75, color=BORDER, spaceAfter=12))
+    elements.append(Paragraph(address, s_cover_addr))
+    elements.append(Paragraph(f'{lat:.5f}, {lng:.5f}', s_cover_meta))
+    elements.append(Spacer(1, 22))
+
+    # ── Risk Gauge centered ──
+    gauge = RiskGauge(risk_score, width=220, height=135)
+    gauge_tbl = Table([[gauge]], colWidths=[220])
+    gauge_tbl.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    # Center the gauge table on the page
+    outer_gauge = Table([[gauge_tbl]], colWidths=[pw])
+    outer_gauge.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(outer_gauge)
+
+    elements.append(Paragraph('WATER RISK SCORE',
+        ParagraphStyle('GaugeLabel', fontName='Helvetica',
+            fontSize=8, textColor=GRAY, alignment=TA_CENTER, spaceBefore=2)))
+    elements.append(Spacer(1, 18))
+
+    # ── Cover quick-stats row ──
+    avg_d_disp = f"{int(avg_depth)} ft" if avg_depth else 'N/A'
+    yield_disp = f"{avg_yield} GPM" if avg_yield else 'N/A'
+    haz_disp = str(hazard_count)
+    wells_disp = str(well_count)
+
+    cover_stat_label = ParagraphStyle('CSL', fontName='Helvetica', fontSize=7.5,
+        textColor=GRAY, alignment=TA_CENTER, leading=10)
+    cover_stat_val = ParagraphStyle('CSV', fontName='Helvetica-Bold', fontSize=13,
+        textColor=NAVY, alignment=TA_CENTER, leading=16)
+
+    cs_data = [
+        [Paragraph(wells_disp, cover_stat_val),
+         Paragraph(avg_d_disp, cover_stat_val),
+         Paragraph(yield_disp, cover_stat_val),
+         Paragraph(haz_disp, ParagraphStyle('CSVh', parent=cover_stat_val,
+             textColor=RED if hazard_count > 5 else AMBER if hazard_count > 0 else GREEN))],
+        [Paragraph('Wells Found', cover_stat_label),
+         Paragraph('Avg Depth', cover_stat_label),
+         Paragraph('Avg Yield', cover_stat_label),
+         Paragraph('Hazard Sites', cover_stat_label)],
+    ]
+    cs_tbl = Table(cs_data, colWidths=[pw/4]*4)
+    cs_tbl.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), ICE),
+        ('BOX', (0, 0), (-1, -1), 0.5, LIGHT_BLUE),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, LIGHT_BLUE),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 2),
+        ('TOPPADDING', (0, 1), (-1, 1), 2),
+        ('BOTTOMPADDING', (0, 1), (-1, 1), 8),
+    ]))
+    elements.append(cs_tbl)
+    elements.append(Spacer(1, 24))
+
+    elements.append(HRFlowable(width='50%', thickness=0.5, color=BORDER, spaceAfter=8))
+    elements.append(Paragraph('Water, Environmental &amp; Subsurface Risk Analysis', s_cover_sub))
+    elements.append(Spacer(1, 4))
+    elements.append(Paragraph(f'Generated {now_str}  \u2014  Report {report_id}', s_cover_meta))
+    elements.append(Paragraph('coloradowell.com',
+        ParagraphStyle('url2', parent=s_cover_meta, textColor=BLUE, spaceBefore=3)))
+    elements.append(Spacer(1, 20))
+
+    # ══════════════════════════════════════════════════════════════════════
     # EXECUTIVE SUMMARY
     # ══════════════════════════════════════════════════════════════════════
 
@@ -1321,28 +1496,6 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         ('BOTTOMPADDING', (0, 1), (-1, 1), 8),
     ]))
     elements.append(snap_table)
-    elements.append(Spacer(1, 12))
-
-    # Risk Score compact row
-    rs_color = RED if risk_score >= 70 else AMBER if risk_score >= 40 else GREEN
-    rs_label = 'HIGH RISK' if risk_score >= 70 else 'MODERATE RISK' if risk_score >= 40 else 'LOW RISK'
-    rs_bg = L_RED if risk_score >= 70 else L_AMBER if risk_score >= 40 else L_GREEN
-
-    score_data = [[
-        Paragraph('WATER RISK SCORE', ParagraphStyle('rsh', parent=s_label, fontSize=7)),
-        Paragraph(str(risk_score), ParagraphStyle('rsv', parent=s_value, fontSize=22, textColor=rs_color)),
-        Paragraph(rs_label, ParagraphStyle('rsl', parent=s_body, fontName='Helvetica-Bold', textColor=rs_color, fontSize=10, alignment=TA_CENTER)),
-    ]]
-    score_tbl = Table(score_data, colWidths=[1.4*inch, 1*inch, 2*inch])
-    score_tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), rs_bg),
-        ('BOX', (0, 0), (-1, -1), 1.5, rs_color),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-    ]))
-    elements.append(score_tbl)
     elements.append(Spacer(1, 12))
 
     # Interpretation paragraph
