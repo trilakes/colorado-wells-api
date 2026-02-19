@@ -931,14 +931,15 @@ def nearby_features():
 
 # New payment link IDs for report verification
 REPORT_PAYMENT_LINKS = [
-    'plink_1T215ZCSH1YJHcuWVktIj4RW',   # Single $19
-    'plink_1T215fCSH1YJHcuWd6wiCnrI',   # Pack $49
-    'plink_1T215kCSH1YJHcuWxo8TKhcw',   # Unlimited $97
+    'plink_1T2OhpFiHBHcGzRNjrGsoYjT',   # Single $39
+    'plink_1T2OhqFiHBHcGzRNjMc0JTth',   # Unlimited $49
+    'plink_1T215ZCSH1YJHcuWVktIj4RW',   # Legacy Single $19
+    'plink_1T215fCSH1YJHcuWd6wiCnrI',   # Legacy Pack $49
+    'plink_1T215kCSH1YJHcuWxo8TKhcw',   # Legacy Unlimited $97
 ]
 
 TIER_REPORT_LIMITS = {
     'single': 1,
-    'pack': 10,
     'unlimited': 999999,
 }
 
