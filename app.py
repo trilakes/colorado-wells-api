@@ -84,6 +84,24 @@ OVERLAY_LAYERS = {
         'lat': 'center_lat', 'lng': 'center_lng',
         'bbox_cols': 'aquifer_name, aquifer_code, rock_name, rock_type, min_lat, max_lat, min_lng, max_lng, center_lat, center_lng',
     },
+    'tri': {
+        'table': 'tri_facilities',
+        'label': 'Toxic Release Inventory',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'facility_id, facility_name, latitude, longitude, state, county, city, address, parent_company, closed',
+    },
+    'radon': {
+        'table': 'radon_zones',
+        'label': 'Radon Zones',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'county, state, radon_zone, predicted_level, risk_level, latitude, longitude',
+    },
+    'wqstations': {
+        'table': 'wq_stations',
+        'label': 'Water Quality Monitoring',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'station_id, name, latitude, longitude, state, county, organization, site_type, result_count, site_url',
+    },
 }
 
 
@@ -713,7 +731,8 @@ def overlay_detail(layer, feature_id):
         'oilgas': 'api_number', 'gauges': 'station_id',
         'dams': 'dam_id', 'springs': 'site_id',
         'waterrights': 'record_number', 'groundwater': 'site_id',
-        'aquifers': 'aquifer_code',
+        'aquifers': 'aquifer_code', 'tri': 'facility_id',
+        'radon': 'county', 'wqstations': 'station_id',
     }
     id_col = id_cols.get(layer, 'id')
 
@@ -1009,7 +1028,7 @@ def _increment_reports_used(customer_id, current_used):
         pass
 
 
-def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats):
+def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=None):
     """Generate a professional PDF well report using ReportLab."""
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.colors import HexColor
@@ -1191,14 +1210,19 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats):
     # ── Environmental Hazard Scan ──
     elements.append(Paragraph('Environmental Hazard Scan', heading_style))
     elements.append(Paragraph(
-        'EPA contamination sites and Superfund locations within 5 miles of the property.', small_style))
+        'EPA contamination sites, Superfund locations, and toxic release facilities within 5 miles of the property.', small_style))
     elements.append(Spacer(1, 6))
 
     if hazards:
         haz_header = ['Type', 'Name', 'Distance', 'Status']
         haz_data = [haz_header]
         for h in hazards[:15]:
-            htype = 'Superfund' if h.get('_type') == 'superfund' else 'EPA Site'
+            if h.get('_type') == 'superfund':
+                htype = 'Superfund'
+            elif h.get('_type') == 'tri':
+                htype = 'TRI Facility'
+            else:
+                htype = 'EPA Site'
             name = (h.get('site_name') or '—')[:35]
             dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '—'
             status = (h.get('npl_status') or h.get('category') or '—')[:20]
@@ -1221,6 +1245,22 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats):
         elements.append(Paragraph(
             '<font color="#22c55e">&#10003;</font> <b>No EPA contamination sites or Superfund locations found within 5 miles.</b>',
             body_style))
+
+    # ── Radon Zone Info ──
+    if radon_info:
+        elements.append(Spacer(1, 10))
+        zone = radon_info.get('radon_zone', '?')
+        risk = radon_info.get('risk_level', 'Unknown')
+        county = radon_info.get('county', 'Unknown')
+        level = radon_info.get('predicted_level', '')
+        zone_color = '#d50000' if zone == 1 else '#ff6d00' if zone == 2 else '#2e7d32'
+        radon_text = (
+            f'<b>Radon Zone {zone}</b> — {county} County<br/>'
+            f'Risk Level: <b>{risk}</b>'
+            + (f' | Predicted: {level}' if level else '')
+            + '<br/><i>EPA recommends radon testing for all homes, especially in Zone 1 (highest risk).</i>'
+        )
+        elements.append(Paragraph(radon_text, body_style))
 
     elements.append(Spacer(1, 20))
 
@@ -1369,7 +1409,45 @@ def generate_report():
         for s in superfund:
             s['_type'] = 'superfund'
 
-        hazards = sorted(epa + superfund, key=lambda x: x.get('distance_miles', 99))
+        # Get nearby TRI (Toxic Release Inventory) facilities
+        tri = []
+        try:
+            cur.execute("""
+                SELECT facility_name AS site_name, latitude, longitude, parent_company, city, county, closed,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM tri_facilities
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 15
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            tri = [dict(r) for r in cur.fetchall()]
+            for t in tri:
+                t['_type'] = 'tri'
+                t['category'] = f"TRI — {t.get('parent_company') or t.get('city') or ''}"
+        except Exception:
+            pass  # table may not exist yet
+
+        # Get radon zone for the area
+        radon_info = None
+        try:
+            cur.execute("""
+                SELECT county, radon_zone, predicted_level, risk_level
+                FROM radon_zones
+                WHERE latitude IS NOT NULL
+                ORDER BY SQRT(POW((latitude - %s) * 69.0, 2) +
+                             POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2))
+                LIMIT 1
+            """, (lat, lng, lat))
+            row = cur.fetchone()
+            if row:
+                radon_info = dict(row)
+        except Exception:
+            pass
+
+        hazards = sorted(epa + superfund + tri, key=lambda x: x.get('distance_miles', 99))
 
     finally:
         conn.close()
@@ -1385,7 +1463,7 @@ def generate_report():
     }
 
     # Generate PDF
-    pdf_buf = _generate_report_pdf(address, lat, lng, wells, hazards, area_stats)
+    pdf_buf = _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=radon_info)
 
     # Increment report usage (non-blocking)
     if access.get('customer_id') and access['tier'] != 'unlimited':
