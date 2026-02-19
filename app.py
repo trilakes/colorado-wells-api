@@ -1067,6 +1067,42 @@ def _increment_reports_used(customer_id, current_used):
         pass
 
 
+def _compute_water_risk_score(hazards, radon_info=None):
+    """Compute a 0-100 water risk score based on nearby hazards."""
+    score = 0
+
+    # Weight by hazard type and distance
+    TYPE_WEIGHTS = {
+        'superfund': 25, 'pfas': 22, 'epa': 15, 'eparesponse': 15,
+        'tri': 12, 'rcra': 12, 'brownfield': 10, 'mine': 8, 'fedfac': 8,
+    }
+
+    for h in hazards:
+        htype = h.get('_type', 'epa')
+        dist = h.get('distance_miles', 5)
+        weight = TYPE_WEIGHTS.get(htype, 8)
+
+        # Closer = more dangerous (exponential decay)
+        if dist < 1:
+            score += weight * 1.0
+        elif dist < 2:
+            score += weight * 0.6
+        elif dist < 3:
+            score += weight * 0.3
+        else:
+            score += weight * 0.15
+
+    # Radon zone bonus
+    if radon_info:
+        zone = radon_info.get('radon_zone')
+        if zone == 1:
+            score += 12
+        elif zone == 2:
+            score += 6
+
+    return min(100, round(score))
+
+
 def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=None):
     """Generate a professional PDF well report using ReportLab."""
     from reportlab.lib.pagesizes import letter
@@ -1249,30 +1285,61 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     # ── Environmental Hazard Scan ──
     elements.append(Paragraph('Environmental Hazard Scan', heading_style))
     elements.append(Paragraph(
-        'EPA contamination sites, Superfund locations, and toxic release facilities within 5 miles of the property.', small_style))
+        'EPA contamination sites, Superfund, TRI toxic releases, PFAS \u201cforever chemicals,\u201d mine sites, '
+        'brownfields, RCRA hazardous waste, and federal facilities within 5 miles of the property.', small_style))
     elements.append(Spacer(1, 6))
 
-    if hazards:
-        haz_header = ['Type', 'Name', 'Distance', 'Status']
-        haz_data = [haz_header]
-        for h in hazards[:15]:
-            if h.get('_type') == 'superfund':
-                htype = 'Superfund'
-            elif h.get('_type') == 'tri':
-                htype = 'TRI Facility'
-            else:
-                htype = 'EPA Site'
-            name = (h.get('site_name') or '—')[:35]
-            dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '—'
-            status = (h.get('npl_status') or h.get('category') or '—')[:20]
-            haz_data.append([htype, name, dist, status])
+    # ── Water Risk Score ──
+    risk_score = _compute_water_risk_score(hazards, radon_info)
+    risk_color = '#d50000' if risk_score >= 70 else '#ff6d00' if risk_score >= 40 else '#2e7d32'
+    risk_label = 'HIGH RISK' if risk_score >= 70 else 'MODERATE RISK' if risk_score >= 40 else 'LOW RISK'
+    risk_style = ParagraphStyle('RiskScore', parent=styles['Normal'],
+        fontSize=28, textColor=HexColor(risk_color), fontName='Helvetica-Bold', alignment=TA_CENTER)
+    risk_label_style = ParagraphStyle('RiskLabel', parent=styles['Normal'],
+        fontSize=11, textColor=HexColor(risk_color), fontName='Helvetica-Bold',
+        alignment=TA_CENTER, spaceAfter=4)
+    risk_desc_style = ParagraphStyle('RiskDesc', parent=styles['Normal'],
+        fontSize=9, textColor=GRAY, alignment=TA_CENTER)
 
-        haz_table = Table(haz_data, colWidths=[1*inch, 2.5*inch, 0.8*inch, 1.7*inch], repeatRows=1)
+    risk_box_data = [
+        [Paragraph('WATER RISK SCORE', ParagraphStyle('RiskHead', parent=stat_label, alignment=TA_CENTER))],
+        [Paragraph(str(risk_score), risk_style)],
+        [Paragraph(risk_label, risk_label_style)],
+        [Paragraph(f'{len(hazards)} hazard site{"s" if len(hazards) != 1 else ""} within 5 miles', risk_desc_style)],
+    ]
+    risk_table = Table(risk_box_data, colWidths=[3*inch])
+    risk_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
+        ('BOX', (0, 0), (-1, -1), 2, HexColor(risk_color)),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(risk_table)
+    elements.append(Spacer(1, 12))
+
+    HAZARD_TYPE_LABELS = {
+        'epa': 'EPA Site', 'superfund': 'Superfund', 'tri': 'TRI Facility',
+        'brownfield': 'Brownfield', 'pfas': 'PFAS Site', 'mine': 'Mine Site',
+        'rcra': 'RCRA Facility', 'fedfac': 'Federal Facility', 'eparesponse': 'EPA Response',
+    }
+
+    if hazards:
+        haz_header = ['Type', 'Name', 'Distance', 'Detail']
+        haz_data = [haz_header]
+        for h in hazards[:20]:
+            htype = HAZARD_TYPE_LABELS.get(h.get('_type'), 'Hazard')
+            name = (h.get('site_name') or h.get('facility_name') or '—')[:35]
+            dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '—'
+            detail = (h.get('npl_status') or h.get('category') or h.get('contaminant') or h.get('mine_type') or '—')[:25]
+            haz_data.append([htype, name, dist, detail])
+
+        haz_table = Table(haz_data, colWidths=[1.1*inch, 2.3*inch, 0.8*inch, 1.8*inch], repeatRows=1)
         haz_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), RED),
             ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#fef2f2')]),
             ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#fca5a5')),
@@ -1282,8 +1349,108 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         elements.append(haz_table)
     else:
         elements.append(Paragraph(
-            '<font color="#22c55e">&#10003;</font> <b>No EPA contamination sites or Superfund locations found within 5 miles.</b>',
+            '<font color="#22c55e">&#10003;</font> <b>No contamination sites found within 5 miles — low environmental risk.</b>',
             body_style))
+
+    # ── PFAS Detail Section ──
+    pfas_sites = [h for h in hazards if h.get('_type') == 'pfas']
+    if pfas_sites:
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph('PFAS "Forever Chemical" Sites', ParagraphStyle('PFASHead',
+            parent=heading_style, textColor=HexColor('#9c27b0'))))
+        elements.append(Paragraph(
+            'Per- and polyfluoroalkyl substances (PFAS) are persistent chemicals linked to cancer, '
+            'thyroid disease, and immune system damage. They do not break down in the environment.',
+            small_style))
+        elements.append(Spacer(1, 4))
+        pfas_data = [['Site', 'Source Type', 'Distance', 'Contaminant']]
+        for p in pfas_sites[:10]:
+            pfas_data.append([
+                (p.get('site_name') or '—')[:30],
+                (p.get('source_type') or '—')[:20],
+                f"{p.get('distance_miles', 0):.1f} mi",
+                (p.get('contaminant') or 'PFAS')[:20],
+            ])
+        pfas_tbl = Table(pfas_data, colWidths=[2*inch, 1.3*inch, 0.8*inch, 1.5*inch], repeatRows=1)
+        pfas_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#9c27b0')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#f3e5f5')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#ce93d8')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(pfas_tbl)
+
+    # ── Mine Sites Detail Section ──
+    mine_sites = [h for h in hazards if h.get('_type') == 'mine']
+    if mine_sites:
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph('Nearby Mine Sites', ParagraphStyle('MineHead',
+            parent=heading_style, textColor=HexColor('#6d4c41'))))
+        elements.append(Paragraph(
+            'Abandoned mines can leach heavy metals (arsenic, lead, cadmium) into groundwater. '
+            'Active mines may impact water table levels and quality.',
+            small_style))
+        elements.append(Spacer(1, 4))
+        mine_data = [['Mine Name', 'Type', 'Distance', 'County']]
+        for m in mine_sites[:10]:
+            mine_data.append([
+                (m.get('site_name') or '—')[:30],
+                (m.get('mine_type') or '—')[:20],
+                f"{m.get('distance_miles', 0):.1f} mi",
+                (m.get('county') or '—')[:15],
+            ])
+        mine_tbl = Table(mine_data, colWidths=[2.2*inch, 1.3*inch, 0.8*inch, 1.3*inch], repeatRows=1)
+        mine_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#6d4c41')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#efebe9')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#bcaaa4')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(mine_tbl)
+
+    # ── Brownfield Detail Section ──
+    bf_sites = [h for h in hazards if h.get('_type') == 'brownfield']
+    if bf_sites:
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph('Brownfield Sites', ParagraphStyle('BFHead',
+            parent=heading_style, textColor=HexColor('#e65100'))))
+        elements.append(Paragraph(
+            'Brownfields are former industrial or commercial properties where soil and groundwater '
+            'may be contaminated. Cleanup status affects nearby water safety.',
+            small_style))
+        elements.append(Spacer(1, 4))
+        bf_data = [['Site', 'City', 'Distance', 'Cleanup']]
+        for b in bf_sites[:10]:
+            cleanup = 'Yes' if b.get('cleanup_ind') else 'No'
+            bf_data.append([
+                (b.get('site_name') or '—')[:30],
+                (b.get('city') or '—')[:15],
+                f"{b.get('distance_miles', 0):.1f} mi",
+                cleanup,
+            ])
+        bf_tbl = Table(bf_data, colWidths=[2.2*inch, 1.3*inch, 0.8*inch, 1.3*inch], repeatRows=1)
+        bf_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#e65100')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, HexColor('#fff3e0')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#ffab91')),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(bf_tbl)
 
     # ── Radon Zone Info ──
     if radon_info:
@@ -1532,6 +1699,69 @@ def generate_report():
         except Exception:
             pass
 
+        # Get nearby RCRA hazardous waste facilities
+        rcra = []
+        try:
+            cur.execute("""
+                SELECT site_name, latitude, longitude, city, county,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM rcra_sites
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 10
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            rcra = [dict(r) for r in cur.fetchall()]
+            for r in rcra:
+                r['_type'] = 'rcra'
+                r['category'] = 'RCRA Haz. Waste'
+        except Exception:
+            pass
+
+        # Get nearby Federal Facilities
+        fedfac = []
+        try:
+            cur.execute("""
+                SELECT site_name, latitude, longitude, city, county,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM federal_facilities
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 10
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            fedfac = [dict(r) for r in cur.fetchall()]
+            for f in fedfac:
+                f['_type'] = 'fedfac'
+                f['category'] = 'Federal Facility'
+        except Exception:
+            pass
+
+        # Get nearby EPA Response sites
+        eparesponse = []
+        try:
+            cur.execute("""
+                SELECT site_name, latitude, longitude, city, county,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM epa_response_sites
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 10
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            eparesponse = [dict(r) for r in cur.fetchall()]
+            for e in eparesponse:
+                e['_type'] = 'eparesponse'
+                e['category'] = 'EPA Response'
+        except Exception:
+            pass
+
         # Get radon zone for the area
         radon_info = None
         try:
@@ -1549,7 +1779,7 @@ def generate_report():
         except Exception:
             pass
 
-        hazards = sorted(epa + superfund + tri + brownfields + pfas + mines, key=lambda x: x.get('distance_miles', 99))
+        hazards = sorted(epa + superfund + tri + brownfields + pfas + mines + rcra + fedfac + eparesponse, key=lambda x: x.get('distance_miles', 99))
 
     finally:
         conn.close()
