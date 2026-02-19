@@ -102,6 +102,42 @@ OVERLAY_LAYERS = {
         'lat': 'latitude', 'lng': 'longitude',
         'bbox_cols': 'station_id, name, latitude, longitude, state, county, organization, site_type, result_count, site_url',
     },
+    'brownfields': {
+        'table': 'brownfield_sites',
+        'label': 'Brownfield Sites',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'registry_id, site_name, latitude, longitude, state, county, city, epa_id, property_id, cleanup_ind, assess_ind, site_url',
+    },
+    'rcra': {
+        'table': 'rcra_sites',
+        'label': 'RCRA Corrective Action',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'handler_id, handler_name, latitude, longitude, state, county, city, epa_id, gpra_ca, site_url',
+    },
+    'fedfac': {
+        'table': 'federal_facilities',
+        'label': 'Federal Facilities',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'registry_id, site_name, latitude, longitude, state, county, city, epa_id, agency_owner, federal_agency, ff_superfund, ff_rcra, ff_brac, site_url',
+    },
+    'eparesponse': {
+        'table': 'epa_response_sites',
+        'label': 'EPA Emergency Response',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'registry_id, site_name, latitude, longitude, state, county, city, epa_id, osc_site_id, response_type, response_status, site_url',
+    },
+    'mines': {
+        'table': 'mine_sites',
+        'label': 'Mine Sites',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'id, site_name, mine_type, latitude, longitude, county, topo_name',
+    },
+    'pfas': {
+        'table': 'pfas_sites',
+        'label': 'PFAS Contamination',
+        'lat': 'latitude', 'lng': 'longitude',
+        'bbox_cols': 'id, site_name, source_type, latitude, longitude, state, county, city, facility_id, contaminant',
+    },
 }
 
 
@@ -733,6 +769,9 @@ def overlay_detail(layer, feature_id):
         'waterrights': 'record_number', 'groundwater': 'site_id',
         'aquifers': 'aquifer_code', 'tri': 'facility_id',
         'radon': 'county', 'wqstations': 'station_id',
+        'brownfields': 'registry_id', 'rcra': 'handler_id',
+        'fedfac': 'registry_id', 'eparesponse': 'registry_id',
+        'mines': 'id', 'pfas': 'id',
     }
     id_col = id_cols.get(layer, 'id')
 
@@ -1430,6 +1469,69 @@ def generate_report():
         except Exception:
             pass  # table may not exist yet
 
+        # Get nearby Brownfields
+        brownfields = []
+        try:
+            cur.execute("""
+                SELECT site_name, latitude, longitude, city, county, cleanup_ind, assess_ind,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM brownfield_sites
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 15
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            brownfields = [dict(r) for r in cur.fetchall()]
+            for b in brownfields:
+                b['_type'] = 'brownfield'
+                b['category'] = 'Brownfield Site'
+        except Exception:
+            pass
+
+        # Get nearby PFAS sites
+        pfas = []
+        try:
+            cur.execute("""
+                SELECT site_name, latitude, longitude, source_type, city, county, contaminant,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM pfas_sites
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 15
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            pfas = [dict(r) for r in cur.fetchall()]
+            for p in pfas:
+                p['_type'] = 'pfas'
+                p['category'] = f"PFAS — {p.get('source_type') or ''}"
+        except Exception:
+            pass
+
+        # Get nearby mines
+        mines = []
+        try:
+            cur.execute("""
+                SELECT site_name, mine_type, latitude, longitude, county,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM mine_sites
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 10
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            mines = [dict(r) for r in cur.fetchall()]
+            for m in mines:
+                m['_type'] = 'mine'
+                m['category'] = f"Mine — {m.get('mine_type') or ''}"
+        except Exception:
+            pass
+
         # Get radon zone for the area
         radon_info = None
         try:
@@ -1447,7 +1549,7 @@ def generate_report():
         except Exception:
             pass
 
-        hazards = sorted(epa + superfund + tri, key=lambda x: x.get('distance_miles', 99))
+        hazards = sorted(epa + superfund + tri + brownfields + pfas + mines, key=lambda x: x.get('distance_miles', 99))
 
     finally:
         conn.close()
