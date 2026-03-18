@@ -1459,6 +1459,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     elements.append(Paragraph('coloradowell.com',
         ParagraphStyle('url2', parent=s_cover_meta, textColor=BLUE, spaceBefore=3)))
     elements.append(Spacer(1, 20))
+    elements.append(PageBreak())
 
     # ══════════════════════════════════════════════════════════════════════
     # EXECUTIVE SUMMARY
@@ -1545,6 +1546,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     # WATER INTELLIGENCE
     # ══════════════════════════════════════════════════════════════════════
 
+    elements.append(CondPageBreak(2*inch))
     elements.append(Paragraph('Water Intelligence', s_section))
     section_divider()
 
@@ -1591,14 +1593,13 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         deep_ = sum(1 for w in wells if w.get('depth_total') and w['depth_total'] >= 500)
         total_w = len([w for w in wells if w.get('depth_total')])
         if total_w > 0:
-            elements.append(Paragraph('Well Depth Distribution', s_subsection))
             dd = [
                 ['Depth Range', 'Count', '%'],
                 ['Under 200 ft (shallow)', str(shallow), f"{shallow/total_w*100:.0f}%"],
                 ['200\u2013500 ft (moderate)', str(medium), f"{medium/total_w*100:.0f}%"],
                 ['Over 500 ft (deep)', str(deep_), f"{deep_/total_w*100:.0f}%"],
             ]
-            dd_tbl = Table(dd, colWidths=[2.5*inch, 0.8*inch, 0.8*inch])
+            dd_tbl = Table(dd, colWidths=[4.7*inch, 1.25*inch, 1.25*inch])
             dd_tbl.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), NAVY),
                 ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
@@ -1607,14 +1608,18 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
                 ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
                 ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
             ]))
-            elements.append(dd_tbl)
-            elements.append(Spacer(1, 8))
+            elements.append(KeepTogether([
+                Paragraph('Well Depth Distribution', s_subsection),
+                dd_tbl,
+                Spacer(1, 8),
+            ]))
 
     # Nearby wells table (top 15)
     if wells:
+        elements.append(CondPageBreak(1.5*inch))
         elements.append(Paragraph('Nearby Well Records', s_subsection))
         elements.append(Paragraph('Official state well permit records, sorted by distance.', s_body_sm))
         elements.append(Spacer(1, 3))
@@ -1625,23 +1630,23 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             depth = f"{int(w['depth_total'])} ft" if w.get('depth_total') else '\u2014'
             swl = f"{int(w['static_water_level'])} ft" if w.get('static_water_level') else '\u2014'
             yld = f"{w['pump_yield_gpm']} GPM" if w.get('pump_yield_gpm') else '\u2014'
-            aq = (w.get('aquifers') or '\u2014')[:18]
+            aq = (w.get('aquifers') or '\u2014')[:30]
             yr = str(w.get('date_completed', ''))[:4] if w.get('date_completed') else '\u2014'
             wd.append([dist, depth, swl, yld, aq, yr])
 
-        well_tbl = Table(wd, colWidths=[0.65*inch, 0.65*inch, 0.7*inch, 0.65*inch, 1.6*inch, 0.5*inch], repeatRows=1)
+        well_tbl = Table(wd, colWidths=[0.85*inch, 0.85*inch, 1.0*inch, 0.9*inch, 2.8*inch, 0.8*inch], repeatRows=1)
         well_tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), SLATE),
             ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 7.5),
-            ('FONTSIZE', (0, 1), (-1, -1), 7.5),
+            ('FONTSIZE', (0, 0), (-1, 0), 8),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
             ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         ]))
         elements.append(well_tbl)
 
@@ -1649,6 +1654,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     # DRILLING COST ESTIMATE
     # ══════════════════════════════════════════════════════════════════════
 
+    elements.append(CondPageBreak(2.5*inch))
     elements.append(Paragraph('Drilling Cost Estimate', s_section))
     section_divider()
 
@@ -1664,23 +1670,25 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             ['Average for area', f"{int(avg_depth)} ft", f"${int(avg_depth*50):,}", f"${int(avg_depth*75):,}"],
             ['Deep (maximum)', f"{int(max_depth)} ft", f"${int(max_depth*50):,}", f"${int(max_depth*75):,}"],
         ]
-        cost_tbl = Table(cd, colWidths=[1.4*inch, 1.1*inch, 1.2*inch, 1.2*inch])
+        cost_tbl = Table(cd, colWidths=[2.2*inch, 1.6*inch, 1.7*inch, 1.7*inch])
         cost_tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), BLUE),
             ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTSIZE', (0, 0), (-1, -1), 9.5),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, ICE]),
             ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
-            ('TOPPADDING', (0, 0), (-1, -1), 5),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ]))
-        elements.append(cost_tbl)
-        elements.append(Spacer(1, 4))
-        elements.append(Paragraph(
-            '<i>Note: Actual costs vary by driller, terrain, rock type, casing, and permit requirements. '
-            'Pump, pressure tank, and hookup add $3,000\u2013$8,000.</i>', s_body_sm))
+        elements.append(KeepTogether([
+            cost_tbl,
+            Spacer(1, 4),
+            Paragraph(
+                '<i>Note: Actual costs vary by driller, terrain, rock type, casing, and permit requirements. '
+                'Pump, pressure tank, and hookup add $3,000\u2013$8,000.</i>', s_body_sm),
+        ]))
     else:
         elements.append(Paragraph('Insufficient well depth data to generate a cost estimate for this area.', s_body))
 
@@ -1688,6 +1696,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     # ENVIRONMENTAL EXPOSURE
     # ══════════════════════════════════════════════════════════════════════
 
+    elements.append(PageBreak())
     elements.append(Paragraph('Environmental Exposure Analysis', s_section))
     section_divider()
 
@@ -1721,7 +1730,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         f'{nearest_haz_dist} mi' if nearest_haz_dist else '\u2014'
     ])
 
-    prox_tbl = Table(prox_data, colWidths=[1.3*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.8*inch], repeatRows=1)
+    prox_tbl = Table(prox_data, colWidths=[2.2*inch, 0.95*inch, 0.95*inch, 0.95*inch, 0.95*inch, 1.2*inch], repeatRows=1)
     prox_styles = [
         ('BACKGROUND', (0, 0), (-1, 0), NAVY),
         ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
@@ -1750,28 +1759,32 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     def hazard_subsection(title, title_color, items, detail_fn, interp_text, bg_color):
         if not items:
             return
-        elements.append(Paragraph(title, ParagraphStyle('HS_' + title[:8], parent=s_subsection, textColor=title_color)))
-        elements.append(Paragraph(interp_text, s_interp))
         rows = [['Site Name', 'Distance', 'Detail']]
         for h in items[:8]:
-            name = (h.get('site_name') or h.get('facility_name') or '\u2014')[:35]
+            name = (h.get('site_name') or h.get('facility_name') or '\u2014')[:45]
             dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '\u2014'
             detail = detail_fn(h)
             rows.append([name, dist, detail])
-        tbl = Table(rows, colWidths=[2.4*inch, 0.7*inch, 1.8*inch], repeatRows=1)
+        tbl = Table(rows, colWidths=[3.8*inch, 1.2*inch, 2.2*inch], repeatRows=1)
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), title_color),
             ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 7.5),
             ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, bg_color]),
             ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
-            ('TOPPADDING', (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
         ]))
-        elements.append(tbl)
-        elements.append(Spacer(1, 6))
+        elements.append(KeepTogether([
+            Paragraph(title, ParagraphStyle('HS_' + title[:8], parent=s_subsection, textColor=title_color)),
+            Paragraph(interp_text, s_interp),
+            tbl,
+            Spacer(1, 8),
+        ]))
 
     # EPA & Cleanup
     epa_bf = [h for h in hazards if h.get('_type') in ('epa', 'eparesponse', 'brownfield')]
@@ -1867,7 +1880,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             Paragraph(f'<b>{rc_name} County</b><br/>Risk: {rr}' + (f' | {pred}' if pred else ''), s_body),
             Paragraph('EPA recommends radon testing for all homes. Zone 1 = highest risk (>4 pCi/L predicted).', s_body_sm),
         ]]
-        radon_tbl = Table(radon_data, colWidths=[1*inch, 2*inch, 2.5*inch])
+        radon_tbl = Table(radon_data, colWidths=[1.4*inch, 2.5*inch, 3.3*inch])
         radon_tbl.setStyle(TableStyle([
             ('BOX', (0, 0), (-1, -1), 0.5, BORDER),
             ('BACKGROUND', (0, 0), (0, 0), LGRAY),
