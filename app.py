@@ -1184,6 +1184,28 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         fontSize=7.5, textColor=GRAY, alignment=TA_CENTER)
     s_disclaimer = ParagraphStyle('Disclaimer', fontName='Helvetica',
         fontSize=7.5, textColor=GRAY, leading=10)
+    # Reusable cell styles for word-wrapping table content
+    s_cell = ParagraphStyle('Cell', fontName='Helvetica',
+        fontSize=8, textColor=SLATE, leading=11, wordWrap='LTR')
+    s_cell_bold = ParagraphStyle('CellBold', fontName='Helvetica-Bold',
+        fontSize=8, textColor=SLATE, leading=11, wordWrap='LTR')
+    s_cell_gray = ParagraphStyle('CellGray', fontName='Helvetica-Bold',
+        fontSize=8, textColor=GRAY, leading=11, wordWrap='LTR')
+    s_cell_sm = ParagraphStyle('CellSm', fontName='Helvetica',
+        fontSize=7.5, textColor=SLATE, leading=10, wordWrap='LTR')
+    s_cell_hdr = ParagraphStyle('CellHdr', fontName='Helvetica-Bold',
+        fontSize=8, textColor=WHITE, leading=11, wordWrap='LTR')
+
+    def P(text, bold=False, gray=False, sm=False, hdr=False, color=None):
+        """Wrap a plain string in a word-wrapping Paragraph for table cells."""
+        if hdr:  style = s_cell_hdr
+        elif sm:   style = s_cell_sm
+        elif gray: style = s_cell_gray
+        elif bold: style = s_cell_bold
+        else:    style = s_cell
+        if color:
+            return Paragraph(f'<font color="{color}">{text}</font>', style)
+        return Paragraph(str(text), style)
 
     doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=0.6*inch,
         bottomMargin=0.5*inch, leftMargin=0.65*inch, rightMargin=0.65*inch)
@@ -1628,16 +1650,17 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         elements.append(Paragraph('Nearby Well Records', s_subsection))
         elements.append(Paragraph('Official state well permit records, sorted by distance.', s_body_sm))
         elements.append(Spacer(1, 3))
-        wh = ['Dist.', 'Depth', 'Water Lvl', 'Yield', 'Aquifer', 'Year']
+        wh = [P('Dist.', hdr=True), P('Depth', hdr=True), P('Water Lvl', hdr=True),
+              P('Yield', hdr=True), P('Aquifer', hdr=True), P('Year', hdr=True)]
         wd = [wh]
         for w in wells[:15]:
             dist = f"{w.get('distance_miles', 0):.1f} mi" if w.get('distance_miles') else '\u2014'
             depth = f"{int(w['depth_total'])} ft" if w.get('depth_total') else '\u2014'
             swl = f"{int(w['static_water_level'])} ft" if w.get('static_water_level') else '\u2014'
             yld = f"{w['pump_yield_gpm']} GPM" if w.get('pump_yield_gpm') else '\u2014'
-            aq = (w.get('aquifers') or '\u2014')[:30]
+            aq = w.get('aquifers') or '\u2014'
             yr = str(w.get('date_completed', ''))[:4] if w.get('date_completed') else '\u2014'
-            wd.append([dist, depth, swl, yld, aq, yr])
+            wd.append([P(dist), P(depth), P(swl), P(yld), P(aq), P(yr)])
 
         well_tbl = Table(wd, colWidths=[0.85*inch, 0.85*inch, 1.0*inch, 0.9*inch, 2.8*inch, 0.8*inch], repeatRows=1)
         well_tbl.setStyle(TableStyle([
@@ -1647,7 +1670,7 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             ('FONTSIZE', (0, 0), (-1, 0), 8),
             ('FONTSIZE', (0, 1), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
             ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
             ('TOPPADDING', (0, 0), (-1, -1), 4),
@@ -1686,37 +1709,29 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             basin_str = w.get('designated_basin') or w.get('management_district') or w.get('denver_basin_aquifer') or '\u2014'
 
             detail_rows = [
-                ['Field', 'Value', 'Field', 'Value'],
-                ['Permit #', permit_id, 'WDID', wdid],
-                ['Distance', dist_str, 'County', _fmt(w.get('county'))],
-                ['Total Depth', _fmt(w.get('depth_total'), ' ft'), 'Elevation', _fmt(w.get('elevation'), ' ft')],
-                ['Top Perf.', _fmt(w.get('top_perforated'), ' ft'), 'Bot. Perf.', _fmt(w.get('bottom_perforated'), ' ft')],
-                ['Static WL', _fmt(w.get('static_water_level'), ' ft'), 'WL Date', _fdate(w.get('static_water_level_date'))],
-                ['Yield', _fmt(w.get('pump_yield_gpm'), ' GPM'), 'Uses', _fmt(w.get('uses'))],
-                ['Aquifer(s)', aq_str[:40], 'Basin', basin_str[:30]],
-                ['Driller', _fmt(w.get('driller_name')), 'License', _fmt(w.get('driller_license'))],
-                ['Pump Installer', _fmt(w.get('pump_installer')), 'Status', _fmt(w.get('status'))],
-                ['Permit Issued', _fdate(w.get('date_permit_issued')), 'Completed', _fdate(w.get('date_completed'))],
-                ['First Use', _fdate(w.get('date_first_use')), 'Pump Install', _fdate(w.get('date_pump_installed'))],
-                ['Legal Desc.', legal_str[:50], 'Parcel', _fmt(w.get('parcel_name'))],
+                [P('Field', hdr=True), P('Value', hdr=True), P('Field', hdr=True), P('Value', hdr=True)],
+                [P('Permit #', gray=True), P(permit_id, bold=True), P('WDID', gray=True), P(wdid)],
+                [P('Distance', gray=True), P(dist_str), P('County', gray=True), P(_fmt(w.get('county')))],
+                [P('Total Depth', gray=True), P(_fmt(w.get('depth_total'), ' ft'), bold=True), P('Elevation', gray=True), P(_fmt(w.get('elevation'), ' ft'))],
+                [P('Top Perf.', gray=True), P(_fmt(w.get('top_perforated'), ' ft')), P('Bot. Perf.', gray=True), P(_fmt(w.get('bottom_perforated'), ' ft'))],
+                [P('Static WL', gray=True), P(_fmt(w.get('static_water_level'), ' ft'), bold=True), P('WL Date', gray=True), P(_fdate(w.get('static_water_level_date')))],
+                [P('Yield', gray=True), P(_fmt(w.get('pump_yield_gpm'), ' GPM'), bold=True), P('Uses', gray=True), P(_fmt(w.get('uses')))],
+                [P('Aquifer(s)', gray=True), P(aq_str), P('Basin', gray=True), P(basin_str)],
+                [P('Driller', gray=True), P(_fmt(w.get('driller_name'))), P('License', gray=True), P(_fmt(w.get('driller_license')))],
+                [P('Pump Installer', gray=True), P(_fmt(w.get('pump_installer'))), P('Status', gray=True), P(_fmt(w.get('status')))],
+                [P('Permit Issued', gray=True), P(_fdate(w.get('date_permit_issued'))), P('Completed', gray=True), P(_fdate(w.get('date_completed')))],
+                [P('First Use', gray=True), P(_fdate(w.get('date_first_use'))), P('Pump Install', gray=True), P(_fdate(w.get('date_pump_installed')))],
+                [P('Legal Desc.', gray=True), P(legal_str), P('Parcel', gray=True), P(_fmt(w.get('parcel_name')))],
             ]
 
-            detail_tbl = Table(detail_rows,
-                colWidths=[1.4*inch, 2.3*inch, 1.4*inch, 2.1*inch])
             detail_style = [
                 ('BACKGROUND', (0, 0), (-1, 0), SLATE),
-                ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 8),
-                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-                ('FONTNAME', (2, 1), (2, -1), 'Helvetica-Bold'),
-                ('TEXTCOLOR', (0, 1), (0, -1), GRAY),
-                ('TEXTCOLOR', (2, 1), (2, -1), GRAY),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
                 ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
-                ('TOPPADDING', (0, 0), (-1, -1), 3),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]
             header_label = f'Well #{wi+1} \u2014 Permit {permit_id} ({dist_str} from property)'
@@ -1838,12 +1853,12 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             total_lo = subtotal_lo + contingency_lo
             total_hi = subtotal_hi + contingency_hi
 
-            rows = [['Line Item', 'Est. Low', 'Est. High', 'Notes']]
+            rows = [[P('Line Item', hdr=True), P('Est. Low', hdr=True), P('Est. High', hdr=True), P('Notes', hdr=True)]]
             for name, lo, hi, note in items:
-                rows.append([name, f'${lo:,}', f'${hi:,}', note])
-            rows.append(['Subtotal', f'${subtotal_lo:,}', f'${subtotal_hi:,}', ''])
-            rows.append([f'Contingency (8\u201310%)', f'${contingency_lo:,}', f'${contingency_hi:,}', 'Unexpected rock, re-drilling'])
-            rows.append(['\u2192 TOTAL ESTIMATE', f'${total_lo:,}', f'${total_hi:,}', depth_label])
+                rows.append([P(name), P(f'${lo:,}'), P(f'${hi:,}'), P(note)])
+            rows.append([P('Subtotal', bold=True), P(f'${subtotal_lo:,}', bold=True), P(f'${subtotal_hi:,}', bold=True), P('')])
+            rows.append([P(f'Contingency (8\u201310%)', bold=True), P(f'${contingency_lo:,}', bold=True), P(f'${contingency_hi:,}', bold=True), P('Unexpected rock, re-drilling')])
+            rows.append([P('\u2192 TOTAL ESTIMATE', bold=True), P(f'${total_lo:,}', bold=True), P(f'${total_hi:,}', bold=True), P(depth_label)])
 
             tbl = Table(rows, colWidths=[2.7*inch, 1.0*inch, 1.0*inch, 2.5*inch], repeatRows=1)
             n = len(rows)
@@ -1971,12 +1986,12 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     def hazard_subsection(title, title_color, items, detail_fn, interp_text, bg_color):
         if not items:
             return
-        rows = [['Site Name', 'Distance', 'Detail']]
+        rows = [[P('Site Name', hdr=True), P('Distance', hdr=True), P('Detail', hdr=True)]]
         for h in items[:8]:
-            name = (h.get('site_name') or h.get('facility_name') or '\u2014')[:45]
+            name = h.get('site_name') or h.get('facility_name') or '\u2014'
             dist = f"{h.get('distance_miles', 0):.1f} mi" if h.get('distance_miles') else '\u2014'
             detail = detail_fn(h)
-            rows.append([name, dist, detail])
+            rows.append([P(name), P(dist), P(detail)])
         tbl = Table(rows, colWidths=[3.8*inch, 1.2*inch, 2.2*inch], repeatRows=1)
         tbl.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), title_color),
@@ -2090,16 +2105,17 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             + '. Nearby O&amp;G activity may indicate subsurface pressure, methane, or brine migration risk.'
         )
         elements.append(Paragraph(og_intro, s_interp))
-        og_rows = [['Well Name / Operator', 'Type', 'Status', 'Depth', 'Formation', 'Dist.']]
+        og_rows = [[P('Well Name / Operator', hdr=True), P('Type', hdr=True), P('Status', hdr=True),
+                    P('Depth', hdr=True), P('Formation', hdr=True), P('Dist.', hdr=True)]]
         for o in oil_gas[:10]:
-            name = (o.get('well_name') or o.get('operator') or '\u2014')[:30]
+            name = o.get('well_name') or o.get('operator') or '\u2014'
             og_rows.append([
-                name,
-                (o.get('well_type') or '\u2014')[:12],
-                (o.get('well_status') or '\u2014')[:10],
-                f"{int(o['depth'])} ft" if o.get('depth') else '\u2014',
-                (o.get('formation') or '\u2014')[:18],
-                f"{o.get('distance_miles',0):.1f} mi",
+                P(name),
+                P(o.get('well_type') or '\u2014'),
+                P(o.get('well_status') or '\u2014'),
+                P(f"{int(o['depth'])} ft" if o.get('depth') else '\u2014'),
+                P(o.get('formation') or '\u2014'),
+                P(f"{o.get('distance_miles',0):.1f} mi"),
             ])
         og_tbl = Table(og_rows, colWidths=[2.4*inch, 1.1*inch, 1.0*inch, 0.8*inch, 1.3*inch, 0.6*inch], repeatRows=1)
         og_tbl.setStyle(TableStyle([
