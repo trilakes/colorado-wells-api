@@ -1104,8 +1104,13 @@ def _compute_water_risk_score(hazards, radon_info=None):
     return min(100, round(score))
 
 
-def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=None):
+def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=None,
+                         oil_gas=None, water_rights_nearby=None, springs_nearby=None, gauges_nearby=None):
     """Generate an ultra-premium PDF property water & environmental risk report."""
+    oil_gas = oil_gas or []
+    water_rights_nearby = water_rights_nearby or []
+    springs_nearby = springs_nearby or []
+    gauges_nearby = gauges_nearby or []
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.colors import HexColor, Color
     from reportlab.lib.units import inch
@@ -1650,45 +1655,252 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
         ]))
         elements.append(well_tbl)
 
+    # ── Nearest Well Permit Details (top 3 wells) ──
+    if wells:
+        detail_wells = wells[:3]
+        elements.append(CondPageBreak(1.5*inch))
+        elements.append(Paragraph('Nearest Well Permit Details', s_subsection))
+        elements.append(Paragraph(
+            'Full state permit records for the three closest wells to this property.', s_body_sm))
+        elements.append(Spacer(1, 4))
+
+        def _fmt(val, suffix=''):
+            return f"{val}{suffix}" if val else '\u2014'
+
+        def _fdate(d):
+            if not d: return '\u2014'
+            return str(d)[:10]
+
+        for wi, w in enumerate(detail_wells):
+            dist_str = f"{w.get('distance_miles', 0):.2f} mi" if w.get('distance_miles') else '\u2014'
+            permit_id = w.get('permit') or w.get('receipt') or '\u2014'
+            wdid = w.get('wdid') or '\u2014'
+
+            # Legal description
+            legal_parts = [p for p in [w.get('pm'), w.get('township'), w.get('range'), w.get('section')] if p]
+            legal_str = ' '.join(legal_parts) if legal_parts else '\u2014'
+            if w.get('q160'): legal_str += f" Q160:{w['q160']}"
+
+            # Aquifer info
+            aq_str = w.get('aquifers') or w.get('as_built_aquifers') or '\u2014'
+            basin_str = w.get('designated_basin') or w.get('management_district') or w.get('denver_basin_aquifer') or '\u2014'
+
+            detail_rows = [
+                ['Field', 'Value', 'Field', 'Value'],
+                ['Permit #', permit_id, 'WDID', wdid],
+                ['Distance', dist_str, 'County', _fmt(w.get('county'))],
+                ['Total Depth', _fmt(w.get('depth_total'), ' ft'), 'Elevation', _fmt(w.get('elevation'), ' ft')],
+                ['Top Perf.', _fmt(w.get('top_perforated'), ' ft'), 'Bot. Perf.', _fmt(w.get('bottom_perforated'), ' ft')],
+                ['Static WL', _fmt(w.get('static_water_level'), ' ft'), 'WL Date', _fdate(w.get('static_water_level_date'))],
+                ['Yield', _fmt(w.get('pump_yield_gpm'), ' GPM'), 'Uses', _fmt(w.get('uses'))],
+                ['Aquifer(s)', aq_str[:40], 'Basin', basin_str[:30]],
+                ['Driller', _fmt(w.get('driller_name')), 'License', _fmt(w.get('driller_license'))],
+                ['Pump Installer', _fmt(w.get('pump_installer')), 'Status', _fmt(w.get('status'))],
+                ['Permit Issued', _fdate(w.get('date_permit_issued')), 'Completed', _fdate(w.get('date_completed'))],
+                ['First Use', _fdate(w.get('date_first_use')), 'Pump Install', _fdate(w.get('date_pump_installed'))],
+                ['Legal Desc.', legal_str[:50], 'Parcel', _fmt(w.get('parcel_name'))],
+            ]
+
+            detail_tbl = Table(detail_rows,
+                colWidths=[1.4*inch, 2.3*inch, 1.4*inch, 2.1*inch])
+            detail_style = [
+                ('BACKGROUND', (0, 0), (-1, 0), SLATE),
+                ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (2, 1), (2, -1), 'Helvetica-Bold'),
+                ('TEXTCOLOR', (0, 1), (0, -1), GRAY),
+                ('TEXTCOLOR', (2, 1), (2, -1), GRAY),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LGRAY]),
+                ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ]
+            header_label = f'Well #{wi+1} \u2014 Permit {permit_id} ({dist_str} from property)'
+            elements.append(KeepTogether([
+                Paragraph(header_label, ParagraphStyle(f'wdh{wi}', parent=s_body_sm,
+                    fontName='Helvetica-Bold', textColor=BLUE, spaceBefore=6)),
+                Table(detail_rows, colWidths=[1.4*inch, 2.3*inch, 1.4*inch, 2.1*inch],
+                      style=TableStyle(detail_style)),
+                Spacer(1, 6),
+            ]))
+
+    # ── Water Management & Basin Info ──
+    elements.append(CondPageBreak(1.5*inch))
+    elements.append(Paragraph('Water Management & Basin', s_subsection))
+
+    # Collect unique basin/district info from nearby wells
+    basins = set()
+    districts = set()
+    denver_basins = set()
+    for w in wells[:20]:
+        if w.get('designated_basin'): basins.add(w['designated_basin'])
+        if w.get('management_district'): districts.add(w['management_district'])
+        if w.get('denver_basin_aquifer'): denver_basins.add(w['denver_basin_aquifer'])
+
+    wm_rows = []
+    if basins:
+        wm_rows.append(['Designated Basin(s)', ', '.join(sorted(basins))])
+    if districts:
+        wm_rows.append(['Management District(s)', ', '.join(sorted(districts))])
+    if denver_basins:
+        wm_rows.append(['Denver Basin Aquifer(s)', ', '.join(sorted(denver_basins))])
+    if water_rights_nearby:
+        active_wr = [r for r in water_rights_nearby if (r.get('status') or '').lower() in ('active','absolute','conditional','')]
+        use_types = list(dict.fromkeys(r.get('use_type','') for r in water_rights_nearby[:10] if r.get('use_type')))
+        wm_rows.append(['Water Rights within 5 mi', f"{len(water_rights_nearby)} records"])
+        if use_types:
+            wm_rows.append(['Documented Use Types', ', '.join(use_types[:6])])
+        if active_wr:
+            wm_rows.append(['Active/Absolute Rights', str(len(active_wr))])
+
+    if springs_nearby:
+        spring_names = [s.get('name') or 'Unnamed Spring' for s in springs_nearby[:5]]
+        wm_rows.append(['Natural Springs within 5 mi', f"{len(springs_nearby)} — nearest: {springs_nearby[0].get('name') or 'Unnamed'} ({springs_nearby[0].get('distance_miles',0):.1f} mi)"])
+
+    if gauges_nearby:
+        g = gauges_nearby[0]
+        gauge_str = g.get('name') or 'Unknown Station'
+        if g.get('flow_cfs'): gauge_str += f" | Flow: {g['flow_cfs']} cfs"
+        if g.get('stage_ft'): gauge_str += f" | Stage: {g['stage_ft']} ft"
+        wm_rows.append(['Nearest Stream Gauge', gauge_str])
+
+    if wm_rows:
+        wm_tbl = Table([[Paragraph(r[0], ParagraphStyle('wml', parent=s_body_sm, fontName='Helvetica-Bold', textColor=GRAY)),
+                         Paragraph(r[1], s_body)] for r in wm_rows],
+                       colWidths=[2.5*inch, 4.7*inch])
+        wm_tbl.setStyle(TableStyle([
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [ICE, WHITE]),
+            ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        elements.append(wm_tbl)
+    else:
+        elements.append(Paragraph('No water management district or basin data recorded for nearby wells.', s_body))
+
+    elements.append(Spacer(1, 10))
+
     # ══════════════════════════════════════════════════════════════════════
     # DRILLING COST ESTIMATE
     # ══════════════════════════════════════════════════════════════════════
 
-    elements.append(CondPageBreak(2.5*inch))
+    elements.append(CondPageBreak(3*inch))
     elements.append(Paragraph('Drilling Cost Estimate', s_section))
     section_divider()
 
     if isinstance(avg_depth, (int, float)) and avg_depth > 0:
         elements.append(Paragraph(
-            f'Based on <b>{well_count} nearby wells</b> with depth data, '
-            f'using Colorado\'s typical drilling rate of <b>$50\u2013$75 per foot</b>:', s_body))
-        elements.append(Spacer(1, 6))
+            f'Detailed cost breakdown based on <b>{well_count} nearby wells</b> with an average depth of '
+            f'<b>{int(avg_depth)} ft</b>. Estimates use current (2026) Colorado contractor rates.',
+            s_body))
+        elements.append(Spacer(1, 8))
 
-        cd = [
-            ['Scenario', 'Est. Depth', 'Cost @ $50/ft', 'Cost @ $75/ft'],
-            ['Shallow (minimum)', f"{int(min_depth)} ft", f"${int(min_depth*50):,}", f"${int(min_depth*75):,}"],
-            ['Average for area', f"{int(avg_depth)} ft", f"${int(avg_depth*50):,}", f"${int(avg_depth*75):,}"],
-            ['Deep (maximum)', f"{int(max_depth)} ft", f"${int(max_depth*50):,}", f"${int(max_depth*75):,}"],
+        def _drill_pump_cost(depth):
+            """Return (low, high) for pump + drop pipe based on depth."""
+            if depth < 200:   pump_lo, pump_hi = 900,  1600
+            elif depth < 400: pump_lo, pump_hi = 1600, 2900
+            elif depth < 600: pump_lo, pump_hi = 2900, 4800
+            else:             pump_lo, pump_hi = 4800, 7500
+            pipe_lo = int(depth * 1.75)
+            pipe_hi = int(depth * 3.00)
+            return pump_lo + pipe_lo, pump_hi + pipe_hi
+
+        def _build_cost_table(depth_label, depth_val):
+            drill_lo = int(depth_val * 65);  drill_hi = int(depth_val * 80)
+            casing_lo = int(depth_val * 16); casing_hi = int(depth_val * 26)
+            grout_lo  = int(depth_val * 4);  grout_hi  = int(depth_val * 8)
+            pump_lo, pump_hi = _drill_pump_cost(depth_val)
+            items = [
+                ('Rotary drilling',          drill_lo,  drill_hi,  f'@ $65\u2013$80/ft \xd7 {int(depth_val)} ft'),
+                ('Steel casing (6\u2033 dia.)', casing_lo, casing_hi, f'@ $16\u2013$26/ft \xd7 {int(depth_val)} ft'),
+                ('Grout/annular seal',         grout_lo,  grout_hi,  f'@ $4\u2013$8/ft (partial depth)'),
+                ('Well development & test',     500,       1500,      'Surging, bailing, pump test'),
+                ('Submersible pump + drop pipe', pump_lo,  pump_hi,  f'Depth-rated pump + poly pipe'),
+                ('Pump installation labor',      600,       1400,     'Crew + setting pump'),
+                ('Pressure tank (captive)',       450,        900,     '40\u201386 gal, bladder-style'),
+                ('Electrical circuit (250V)',      900,       3000,    'Panel to wellhead, single-phase'),
+                ('Pitless adapter / wellhead',     150,        400,    'Frost-free below-grade fitting'),
+                ('Colorado well permit',           100,        350,    'State application + inspection fees'),
+                ('Water quality testing',          250,        650,    'Bacteria, nitrates, metals panel'),
+                ('Driller mobilization',           600,       1800,    'Distance & access dependent'),
+                ('Site prep / access road',          0,        800,    'If site is difficult to access'),
+            ]
+            subtotal_lo = sum(i[1] for i in items)
+            subtotal_hi = sum(i[2] for i in items)
+            contingency_lo = int(subtotal_lo * 0.08)
+            contingency_hi = int(subtotal_hi * 0.10)
+            total_lo = subtotal_lo + contingency_lo
+            total_hi = subtotal_hi + contingency_hi
+
+            rows = [['Line Item', 'Est. Low', 'Est. High', 'Notes']]
+            for name, lo, hi, note in items:
+                rows.append([name, f'${lo:,}', f'${hi:,}', note])
+            rows.append(['Subtotal', f'${subtotal_lo:,}', f'${subtotal_hi:,}', ''])
+            rows.append([f'Contingency (8\u201310%)', f'${contingency_lo:,}', f'${contingency_hi:,}', 'Unexpected rock, re-drilling'])
+            rows.append(['\u2192 TOTAL ESTIMATE', f'${total_lo:,}', f'${total_hi:,}', depth_label])
+
+            tbl = Table(rows, colWidths=[2.7*inch, 1.0*inch, 1.0*inch, 2.5*inch], repeatRows=1)
+            n = len(rows)
+            style = [
+                ('BACKGROUND', (0, 0), (-1, 0), BLUE),
+                ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+                ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
+                ('ROWBACKGROUNDS', (0, 1), (-1, n-4), [WHITE, ICE]),
+                # Subtotal row
+                ('BACKGROUND', (0, n-3), (-1, n-3), LGRAY),
+                ('FONTNAME', (0, n-3), (-1, n-3), 'Helvetica-Bold'),
+                # Contingency row
+                ('ROWBACKGROUNDS', (0, n-2), (-1, n-2), [LGRAY]),
+                # Total row
+                ('BACKGROUND', (0, n-1), (-1, n-1), NAVY),
+                ('TEXTCOLOR', (0, n-1), (-1, n-1), WHITE),
+                ('FONTNAME', (0, n-1), (-1, n-1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, n-1), (-1, n-1), 9),
+                ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ]
+            return tbl, style, total_lo, total_hi
+
+        # Three scenario tables: shallow / average / deep
+        scenarios = [
+            ('Shallow scenario', min_depth or avg_depth),
+            ('Average for this area', avg_depth),
+            ('Deep scenario', max_depth or avg_depth),
         ]
-        cost_tbl = Table(cd, colWidths=[2.2*inch, 1.6*inch, 1.7*inch, 1.7*inch])
-        cost_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), BLUE),
-            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9.5),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, ICE]),
-            ('GRID', (0, 0), (-1, -1), 0.5, BORDER),
-            ('TOPPADDING', (0, 0), (-1, -1), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ]))
-        elements.append(KeepTogether([
-            cost_tbl,
-            Spacer(1, 4),
-            Paragraph(
-                '<i>Note: Actual costs vary by driller, terrain, rock type, casing, and permit requirements. '
-                'Pump, pressure tank, and hookup add $3,000\u2013$8,000.</i>', s_body_sm),
-        ]))
+        for scenario_label, depth_val in scenarios:
+            if not depth_val: continue
+            tbl, style, total_lo, total_hi = _build_cost_table(scenario_label, depth_val)
+            tbl.setStyle(TableStyle(style))
+            elements.append(KeepTogether([
+                Paragraph(f'<b>{scenario_label}</b> \u2014 {int(depth_val)} ft depth',
+                    ParagraphStyle('scen', parent=s_subsection, textColor=BLUE)),
+                Paragraph(f'Estimated total: <b>${total_lo:,} \u2013 ${total_hi:,}</b>',
+                    ParagraphStyle('stot', parent=s_body, textColor=NAVY)),
+                Spacer(1, 4),
+                tbl,
+                Spacer(1, 12),
+            ]))
+
+        elements.append(Paragraph(
+            '<b>What drives your cost:</b> Rock hardness (granite vs. sedimentary) adds $10\u201325/ft. '
+            'Difficult site access adds $500\u20132,000 for equipment staging. '
+            'Domestic wells typically use 4\u2033\u20136\u2033 casing; agricultural/irrigation wells '
+            'use 6\u2033\u20138\u2033 and require higher-capacity pumps. '
+            'Colorado requires a licensed driller, a state permit, and a completion report filed with DWR. '
+            'Get at least 3 competitive bids \u2014 prices vary significantly by contractor and season.',
+            s_body))
+
     else:
         elements.append(Paragraph('Insufficient well depth data to generate a cost estimate for this area.', s_body))
 
@@ -1867,6 +2079,43 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
             'shows low environmental exposure risk based on available EPA, state, and federal databases.',
             s_body))
 
+    # Oil & Gas Wells
+    if oil_gas:
+        elements.append(CondPageBreak(1.5*inch))
+        elements.append(Paragraph('Oil &amp; Gas Well Activity', s_subsection))
+        og_active = [o for o in oil_gas if (o.get('well_status') or '').lower() in ('active', 'producing', 'pa')]
+        og_intro = (
+            f'<b>{len(oil_gas)} oil &amp; gas well{"s" if len(oil_gas)!=1 else ""}</b> recorded within 5 miles'
+            + (f', including <b>{len(og_active)} active/producing</b>' if og_active else '')
+            + '. Nearby O&amp;G activity may indicate subsurface pressure, methane, or brine migration risk.'
+        )
+        elements.append(Paragraph(og_intro, s_interp))
+        og_rows = [['Well Name / Operator', 'Type', 'Status', 'Depth', 'Formation', 'Dist.']]
+        for o in oil_gas[:10]:
+            name = (o.get('well_name') or o.get('operator') or '\u2014')[:30]
+            og_rows.append([
+                name,
+                (o.get('well_type') or '\u2014')[:12],
+                (o.get('well_status') or '\u2014')[:10],
+                f"{int(o['depth'])} ft" if o.get('depth') else '\u2014',
+                (o.get('formation') or '\u2014')[:18],
+                f"{o.get('distance_miles',0):.1f} mi",
+            ])
+        og_tbl = Table(og_rows, colWidths=[2.4*inch, 1.1*inch, 1.0*inch, 0.8*inch, 1.3*inch, 0.6*inch], repeatRows=1)
+        og_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), HexColor('#78350f')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, L_AMBER]),
+            ('GRID', (0, 0), (-1, -1), 0.25, BORDER),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        elements.append(og_tbl)
+        elements.append(Spacer(1, 8))
+
     # Radon
     if radon_info:
         elements.append(Paragraph('Radon Risk', s_subsection))
@@ -1903,12 +2152,15 @@ def _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_in
     elements.append(Spacer(1, 4))
 
     sources = [
-        'Colorado Division of Water Resources \u2014 Well Permit Database',
+        'Colorado Division of Water Resources \u2014 Well Permit Database (permit dates, driller, pump, legal description)',
         'U.S. EPA Envirofacts \u2014 SEMS, Superfund, TRI, RCRA, Brownfields',
         'U.S. EPA \u2014 PFAS Analytic Tools &amp; Detection Data',
         'Colorado Division of Reclamation, Mining &amp; Safety \u2014 Mine Site Inventory',
         'U.S. EPA \u2014 Radon Zone Classification (county-level)',
-        'USGS National Water Information System',
+        'USGS National Water Information System \u2014 Stream Gauges &amp; Groundwater Monitoring',
+        'Colorado OGCC / State Oil &amp; Gas Conservation Commission \u2014 O&amp;G Well Registry',
+        'Colorado DWR \u2014 Water Rights &amp; Basin Administration Records',
+        'USGS NHD \u2014 Spring &amp; Surface Water Features',
     ]
     for src in sources:
         elements.append(Paragraph(f'  \u2022  {src}', s_disclaimer))
@@ -1978,12 +2230,18 @@ def generate_report():
     try:
         cur = conn.cursor()
 
-        # Get nearby wells with distance
+        # Get nearby wells with distance — expanded fields
         cur.execute("""
-            SELECT receipt, permit, latitude, longitude, depth_total,
-                   static_water_level, pump_yield_gpm, aquifers, county,
-                   owner_name, uses, status, driller_name, date_completed,
-                   address, city,
+            SELECT receipt, permit, wdid, latitude, longitude, depth_total,
+                   top_perforated, bottom_perforated, elevation,
+                   static_water_level, static_water_level_date,
+                   pump_yield_gpm, aquifers, as_built_aquifers, county,
+                   owner_name, uses, status, driller_name, driller_license,
+                   pump_installer, date_completed, date_permit_issued,
+                   date_first_use, date_pump_installed,
+                   address, city, parcel_name,
+                   designated_basin, management_district, denver_basin_aquifer,
+                   pm, township, range, section, case_numbers,
                    SQRT(POW((latitude - %s) * 69.0, 2) +
                         POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
                    ) AS distance_miles
@@ -2193,6 +2451,79 @@ def generate_report():
         except Exception:
             pass
 
+        # Get nearby oil & gas wells
+        oil_gas = []
+        try:
+            cur.execute("""
+                SELECT well_name, operator, well_type, well_status, depth, formation,
+                       production_type, spud_date, county,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM oil_gas_wells
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 20
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            oil_gas = [dict(r) for r in cur.fetchall()]
+        except Exception:
+            pass
+
+        # Get nearby active water rights
+        water_rights_nearby = []
+        try:
+            cur.execute("""
+                SELECT basin, use_type, status, total_diversion, pod_record,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM water_rights
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 15
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            water_rights_nearby = [dict(r) for r in cur.fetchall()]
+        except Exception:
+            pass
+
+        # Get nearby springs
+        springs_nearby = []
+        try:
+            cur.execute("""
+                SELECT name, county, land_unit,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM springs
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 10
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            springs_nearby = [dict(r) for r in cur.fetchall()]
+        except Exception:
+            pass
+
+        # Get nearby stream gauges (active monitoring stations)
+        gauges_nearby = []
+        try:
+            cur.execute("""
+                SELECT name, stage_ft, flow_cfs, status, huc8,
+                       SQRT(POW((latitude - %s) * 69.0, 2) +
+                            POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                       ) AS distance_miles
+                FROM stream_gauges
+                WHERE latitude BETWEEN %s AND %s
+                  AND longitude BETWEEN %s AND %s
+                ORDER BY distance_miles
+                LIMIT 5
+            """, (lat, lng, lat, min_lat, max_lat, min_lng, max_lng))
+            gauges_nearby = [dict(r) for r in cur.fetchall()]
+        except Exception:
+            pass
+
         hazards = sorted(epa + superfund + tri + brownfields + pfas + mines + rcra + fedfac + eparesponse, key=lambda x: x.get('distance_miles', 99))
 
     finally:
@@ -2209,7 +2540,14 @@ def generate_report():
     }
 
     # Generate PDF
-    pdf_buf = _generate_report_pdf(address, lat, lng, wells, hazards, area_stats, radon_info=radon_info)
+    pdf_buf = _generate_report_pdf(
+        address, lat, lng, wells, hazards, area_stats,
+        radon_info=radon_info,
+        oil_gas=oil_gas,
+        water_rights_nearby=water_rights_nearby,
+        springs_nearby=springs_nearby,
+        gauges_nearby=gauges_nearby,
+    )
 
     # Increment report usage (non-blocking)
     if access.get('customer_id') and access['tier'] != 'unlimited':
