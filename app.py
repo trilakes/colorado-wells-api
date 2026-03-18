@@ -24,6 +24,7 @@ CORS(app, origins=[
 
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', '')
+SITE_PLANNER_API_KEY = os.environ.get('SITE_PLANNER_API_KEY', '')
 OWNER_EMAILS = ['kyle@trilakes.co']
 VALID_STATES = {'CO', 'AZ', 'NM', 'WY'}
 
@@ -303,6 +304,71 @@ def wells_clusters():
             })
 
         return jsonify({"clusters": clusters, "count": len(clusters)})
+    finally:
+        conn.close()
+
+
+# ─── Wells Nearby (for Colorado Site Planner service-to-service) ─────────────
+
+@app.route('/api/wells/nearby')
+def wells_nearby():
+    """
+    Get wells within a radius of a lat/lng point.
+    Used by the Colorado Site Planner backend (server-to-server).
+
+    Query params:
+      lat, lng       (required)
+      radius         (optional, miles, default 1.0, max 10)
+      limit          (optional, default 200, max 500)
+      api_key        (required when SITE_PLANNER_API_KEY env var is set)
+    """
+    # Service-to-service API key check
+    if SITE_PLANNER_API_KEY:
+        provided = request.args.get('api_key', '')
+        if provided != SITE_PLANNER_API_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+
+    try:
+        lat = float(request.args.get('lat'))
+        lng = float(request.args.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "lat and lng are required"}), 400
+
+    radius_miles = min(float(request.args.get('radius', 1.0)), 10.0)
+    limit = min(int(request.args.get('limit', 200)), 500)
+
+    lat_range = radius_miles / 69.0
+    lng_range = radius_miles / (69.0 * max(math.cos(math.radians(lat)), 0.01))
+
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT receipt, permit, latitude, longitude, depth_total,
+                   status, county, uses, pump_yield_gpm, static_water_level,
+                   aquifers, driller_name, date_completed, address, city,
+                   owner_name, category, elevation, well_state,
+                   SQRT(POW((latitude - %s) * 69.0, 2) +
+                        POW((longitude - %s) * 69.0 * COS(RADIANS(%s)), 2)
+                   ) AS distance_miles
+            FROM wells
+            WHERE latitude BETWEEN %s AND %s
+              AND longitude BETWEEN %s AND %s
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+            ORDER BY distance_miles
+            LIMIT %s
+        """, (lat, lng, lat,
+               lat - lat_range, lat + lat_range,
+               lng - lng_range, lng + lng_range,
+               limit))
+        rows = cur.fetchall()
+        return jsonify({
+            "wells": [dict(r) for r in rows],
+            "count": len(rows),
+            "center": {"lat": lat, "lng": lng},
+            "radius_miles": radius_miles,
+        })
     finally:
         conn.close()
 
