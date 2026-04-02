@@ -652,15 +652,14 @@ def verify_email():
             )
             sessions = r.json()
 
-            # Check new report payment links first
+            # Check payment links for tier detection
             for s in sessions.get('data', []):
                 if s.get('payment_status') != 'paid':
                     continue
                 plink = s.get('payment_link')
-                if plink in REPORT_PAYMENT_LINKS:
-                    idx = REPORT_PAYMENT_LINKS.index(plink)
-                    detected_tier = ['single', 'pack', 'unlimited'][idx]
-                    # Save to customer
+                if plink in PAYMENT_LINK_TIERS:
+                    detected_tier = PAYMENT_LINK_TIERS[plink]
+                    # Save to customer for fast future lookups
                     http_requests.post(
                         f"https://api.stripe.com/v1/customers/{customer_id}",
                         headers=headers, timeout=10,
@@ -696,25 +695,8 @@ def verify_email():
                 return jsonify({"valid": True, "type": "unlimited", "tier": "unlimited",
                                 "reports_remaining": 999999, "message": "Payment verified"})
 
-        # ── Step 2: Email-based fallback ──
-        ALL_PAYMENT_LINKS = REPORT_PAYMENT_LINKS + [
-            'plink_1T0XVOFiHBHcGzRNQXGAkacg',
-            'plink_1T0XVTFiHBHcGzRNkd9H0TWL',
-            'plink_1T0T2KFiHBHcGzRNUJfF6mTD',
-            'plink_1T0SuoFiHBHcGzRNUcVpycOk',
-            'plink_1T0SuoFiHBHcGzRN9NwMrpqm',
-            'plink_1T0Rm2FiHBHcGzRNMDlLGOxZ',
-            'plink_1T0RlwFiHBHcGzRNfHxd5vlh',
-            'plink_1T0O6zFiHBHcGzRNs0fLtb2q',
-            'plink_1T0O6sFiHBHcGzRNYinOZNvg',
-            'plink_1T0O2WFiHBHcGzRNnCDNowrR',
-            'plink_1SjAS0FiHBHcGzRNSfmm24E1',
-        ]
-
-        for plink_id in ALL_PAYMENT_LINKS:
-            plink_id = plink_id.strip()
-            if not plink_id:
-                continue
+        # ── Step 2: Email-based fallback (scans all known payment links) ──
+        for plink_id, plink_tier in PAYMENT_LINK_TIERS.items():
             try:
                 r = http_requests.get(
                     f"https://api.stripe.com/v1/checkout/sessions?payment_link={plink_id}&limit=100",
@@ -724,26 +706,14 @@ def verify_email():
                 for s in sessions.get('data', []):
                     cd = s.get('customer_details') or {}
                     if cd.get('email', '').lower() == email and s.get('payment_status') == 'paid':
-                        # New report links → detect tier
-                        if plink_id in REPORT_PAYMENT_LINKS:
-                            idx = REPORT_PAYMENT_LINKS.index(plink_id)
-                            detected_tier = ['single', 'pack', 'unlimited'][idx]
-                            limit = TIER_REPORT_LIMITS.get(detected_tier, 0)
-                            return jsonify({
-                                "valid": True,
-                                "type": detected_tier,
-                                "tier": detected_tier,
-                                "reports_remaining": limit,
-                                "message": f"{detected_tier.title()} access verified"
-                            })
-                        # Legacy links → unlimited
-                        access_type = 'unlimited'
+                        detected_tier = plink_tier
+                        limit = TIER_REPORT_LIMITS.get(detected_tier, 0)
                         return jsonify({
                             "valid": True,
-                            "type": access_type,
-                            "tier": access_type,
-                            "reports_remaining": 999999,
-                            "message": f"Lifetime access verified (payment found)"
+                            "type": detected_tier,
+                            "tier": detected_tier,
+                            "reports_remaining": limit,
+                            "message": f"{detected_tier.title()} access verified"
                         })
             except Exception:
                 continue
@@ -995,17 +965,38 @@ def nearby_features():
 
 # ─── PDF Report Generation ───────────────────────────────────────────────────
 
-# New payment link IDs for report verification
-REPORT_PAYMENT_LINKS = [
-    'plink_1T2OhpFiHBHcGzRNjrGsoYjT',   # Single $39
-    'plink_1T2OhqFiHBHcGzRNjMc0JTth',   # Unlimited $49
-    'plink_1T215ZCSH1YJHcuWVktIj4RW',   # Legacy Single $19
-    'plink_1T215fCSH1YJHcuWd6wiCnrI',   # Legacy Pack $49
-    'plink_1T215kCSH1YJHcuWxo8TKhcw',   # Legacy Unlimited $97
-]
+# Payment link ID → tier mapping (dict-based, no index bugs)
+# Add new payment links here — that's the ONLY step needed.
+PAYMENT_LINK_TIERS = {
+    # ── Active payment links (CSH account) ──
+    'plink_1T22V5CSH1YJHcuWL0fXmf6r': 'unlimited',   # $49 unlimited (CURRENT)
+    'plink_1T215ZCSH1YJHcuWVktIj4RW': 'single',       # $19 single (CURRENT)
+    'plink_1T215fCSH1YJHcuWd6wiCnrI': 'unlimited',    # Legacy Pack $49 → unlimited
+    'plink_1T215kCSH1YJHcuWxo8TKhcw': 'unlimited',    # Legacy Unlimited $97
+    'plink_1T47E8CSH1YJHcuWtzoRNeMn': 'single',       # Inactive single
+    'plink_1T20n1CSH1YJHcuW90VKSbM3': 'unlimited',    # Inactive
+    'plink_1T20mmCSH1YJHcuW5fbb1Prf': 'unlimited',    # Inactive
+    'plink_1T20mUCSH1YJHcuWJ8z7wNu4': 'unlimited',    # Inactive
+    'plink_1T20mOCSH1YJHcuWvNVJL4bs': 'unlimited',    # Inactive
+    # ── Legacy payment links (FiHBHcGzRN account) ──
+    'plink_1T2OhpFiHBHcGzRNjrGsoYjT': 'single',      # Single $39
+    'plink_1T2OhqFiHBHcGzRNjMc0JTth': 'unlimited',    # Unlimited $49
+    'plink_1T0XVOFiHBHcGzRNQXGAkacg': 'unlimited',
+    'plink_1T0XVTFiHBHcGzRNkd9H0TWL': 'unlimited',
+    'plink_1T0T2KFiHBHcGzRNUJfF6mTD': 'unlimited',
+    'plink_1T0SuoFiHBHcGzRNUcVpycOk': 'unlimited',
+    'plink_1T0SuoFiHBHcGzRN9NwMrpqm': 'unlimited',
+    'plink_1T0Rm2FiHBHcGzRNMDlLGOxZ': 'unlimited',
+    'plink_1T0RlwFiHBHcGzRNfHxd5vlh': 'unlimited',
+    'plink_1T0O6zFiHBHcGzRNs0fLtb2q': 'unlimited',
+    'plink_1T0O6sFiHBHcGzRNYinOZNvg': 'unlimited',
+    'plink_1T0O2WFiHBHcGzRNnCDNowrR': 'unlimited',
+    'plink_1SjAS0FiHBHcGzRNSfmm24E1': 'unlimited',
+}
 
 TIER_REPORT_LIMITS = {
     'single': 1,
+    'pack': 10,
     'unlimited': 999999,
 }
 
@@ -1053,11 +1044,9 @@ def _verify_report_access(email):
             for s in sessions.get('data', []):
                 if s.get('payment_status') != 'paid':
                     continue
-                # Check payment link metadata for tier
                 plink = s.get('payment_link')
-                if plink in REPORT_PAYMENT_LINKS:
-                    idx = REPORT_PAYMENT_LINKS.index(plink)
-                    detected_tier = ['single', 'pack', 'unlimited'][idx]
+                if plink in PAYMENT_LINK_TIERS:
+                    detected_tier = PAYMENT_LINK_TIERS[plink]
                     # Set tier on customer for future lookups
                     http_requests.post(
                         f"https://api.stripe.com/v1/customers/{cust_id}",
@@ -1088,11 +1077,8 @@ def _verify_report_access(email):
             if r.json().get('data'):
                 return {'tier': 'unlimited', 'customer_id': cust_id, 'reports_remaining': 999999}
 
-        # Email-based fallback for all payment links (old + new)
-        all_plinks = REPORT_PAYMENT_LINKS + [
-            'plink_1T0XVOFiHBHcGzRNQXGAkacg', 'plink_1T0XVTFiHBHcGzRNkd9H0TWL',
-        ]
-        for plink_id in all_plinks:
+        # Email-based fallback — scan all known payment links
+        for plink_id, plink_tier in PAYMENT_LINK_TIERS.items():
             try:
                 r = http_requests.get(
                     f"https://api.stripe.com/v1/checkout/sessions?payment_link={plink_id}&limit=100",
@@ -1101,14 +1087,9 @@ def _verify_report_access(email):
                 for s in r.json().get('data', []):
                     cd = s.get('customer_details') or {}
                     if cd.get('email', '').lower() == email and s.get('payment_status') == 'paid':
-                        # Legacy buyers get unlimited
-                        if plink_id not in REPORT_PAYMENT_LINKS:
-                            return {'tier': 'unlimited', 'reports_remaining': 999999}
-                        idx = REPORT_PAYMENT_LINKS.index(plink_id)
-                        detected_tier = ['single', 'pack', 'unlimited'][idx]
                         return {
-                            'tier': detected_tier,
-                            'reports_remaining': TIER_REPORT_LIMITS.get(detected_tier, 0),
+                            'tier': plink_tier,
+                            'reports_remaining': TIER_REPORT_LIMITS.get(plink_tier, 0),
                         }
             except Exception:
                 continue
