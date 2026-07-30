@@ -2653,6 +2653,28 @@ def report_status():
     })
 
 
+# ─── Septic Outlook (free) ───────────────────────────────────────────────────
+
+from septic_outlook import get_septic_outlook
+
+@app.route('/api/septic-outlook')
+def septic_outlook():
+    """Soil-based septic snapshot for a searched point: USDA SSURGO soil ->
+    Reg 43 soil type -> likely OWTS system + field sizing. Free, no auth."""
+    try:
+        lat = float(request.args.get('lat', ''))
+        lng = float(request.args.get('lng', ''))
+    except ValueError:
+        return jsonify({"ok": False, "reason": "lat and lng are required"}), 400
+    if not (36.5 <= lat <= 41.5 and -109.5 <= lng <= -101.5):
+        return jsonify({"ok": False, "reason": "Point is outside Colorado"}), 400
+    try:
+        bedrooms = max(1, min(8, int(request.args.get('bedrooms', 3))))
+    except ValueError:
+        bedrooms = 3
+    return jsonify(get_septic_outlook(lat, lng, bedrooms))
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -2674,6 +2696,7 @@ def home():
             "GET /api/overlay/<layer>/<id>",
             "GET /api/overlay/stats",
             "GET /api/nearby?lat=&lng=&radius=5&layers=contamination,dams",
+            "GET /api/septic-outlook?lat=&lng=&bedrooms=3",
             "POST /api/verify {email}",
             "POST /api/report {email, address, lat, lng}",
             "POST /api/report/status {email}"
