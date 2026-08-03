@@ -2675,6 +2675,29 @@ def septic_outlook():
     return jsonify(get_septic_outlook(lat, lng, bedrooms))
 
 
+# ─── Well Resilience (free) ──────────────────────────────────────────────────
+
+from well_resilience import get_well_resilience
+
+@app.route('/api/well-resilience')
+def well_resilience():
+    """How a well compares to its neighbours: depth percentile, reserve below the
+    screen, water-table margin, producing zones, and drought context. Free, no
+    auth — same posture as /api/septic-outlook."""
+    receipt = (request.args.get('receipt') or '').strip()
+    if not receipt:
+        return jsonify({"ok": False, "reason": "receipt is required"}), 400
+    conn = get_db()
+    try:
+        return jsonify(get_well_resilience(receipt, conn))
+    except Exception as e:
+        # A failure here must never take down a search result.
+        return jsonify({"ok": False,
+                        "reason": "Analysis unavailable: %s" % e.__class__.__name__})
+    finally:
+        conn.close()
+
+
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.route('/')
