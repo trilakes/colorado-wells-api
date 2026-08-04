@@ -39,11 +39,19 @@ MIN_PEERS_ABSOLUTE = 4
 REGIME_MIN_GAP_FT = 40.0
 REGIME_GAP_RATIO = 1.5
 REGIME_MIN_SIDE = 3
-# Producing zones are local; detect them on the nearest neighbours, not the
-# whole radius, or the shallow/deep split blurs into a continuum.
-REGIME_SAMPLE = 30
+# Producing zones are local; detect them on the tight ring around the well, not
+# the whole radius, or the shallow/deep split blurs into a continuum.
+REGIME_RADIUS = 1.0
+REGIME_MIN_SAMPLE = 12
+REGIME_SAMPLE = 25
 
 EXEMPT_YIELD_CAP = 15.0
+
+# Water-table comparison only against wells of similar depth, and only with
+# enough readings to mean something.
+DEPTH_BAND_LO = 0.5
+DEPTH_BAND_HI = 2.0
+MIN_STATIC_READINGS = 4
 
 _TTL = 6 * 3600
 _CACHE_MAX = 400
@@ -93,21 +101,37 @@ def _year(d):
 def _regimes(depths):
     """Split peer depths into producing zones on the largest real gap.
 
-    Returns a list of {lo, hi, count} - one entry when the neighborhood draws
+    Returns a list of {lo, hi, count} - one entry when the neighbourhood draws
     from a single zone, two when there is a clean shallow/deep separation.
+
+    The comparison is against the MEDIAN gap between consecutive depths, not the
+    mean spacing. Drillers cluster on the same depths, so a sorted depth list is
+    mostly near-zero gaps with a few large jumps; mean spacing is dragged upward
+    by those jumps and hides the very structure we are looking for. Duplicate
+    depths make the raw median 0, so nonzero gaps set the yardstick.
     """
     s = sorted(depths)
     if len(s) < 2 * REGIME_MIN_SIDE:
         return [{"lo": s[0], "hi": s[-1], "count": len(s)}] if s else []
 
-    gaps = [(s[i + 1] - s[i], i) for i in range(len(s) - 1)]
-    span = s[-1] - s[0]
-    typical = span / float(len(s) - 1) if len(s) > 1 else 0
-    biggest, idx = max(gaps)
+    gaps = [s[i + 1] - s[i] for i in range(len(s) - 1)]
+    nonzero = [g for g in gaps if g > 0]
+    yardstick = _median(nonzero) if nonzero else 0
+
+    # Only consider splits that leave a real population on BOTH sides. The
+    # single largest gap is usually a lone deep outlier at the top of the range
+    # (e.g. 320 -> 400 ft with two wells above it); taking it blindly fails the
+    # min-side test and collapses the whole thing back to one regime, hiding the
+    # genuine break further down (85 -> 132 ft, shallow alluvial vs bedrock).
+    candidates = [(gaps[i], i) for i in range(len(gaps))
+                  if i + 1 >= REGIME_MIN_SIDE and len(s) - (i + 1) >= REGIME_MIN_SIDE]
+    if not candidates:
+        return [{"lo": s[0], "hi": s[-1], "count": len(s)}]
+    biggest, idx = max(candidates)
 
     lower, upper = s[:idx + 1], s[idx + 1:]
-    if (biggest >= REGIME_MIN_GAP_FT and biggest >= REGIME_GAP_RATIO * typical
-            and len(lower) >= REGIME_MIN_SIDE and len(upper) >= REGIME_MIN_SIDE):
+    if (biggest >= REGIME_MIN_GAP_FT
+            and (yardstick == 0 or biggest >= REGIME_GAP_RATIO * yardstick)):
         return [{"lo": lower[0], "hi": lower[-1], "count": len(lower)},
                 {"lo": upper[0], "hi": upper[-1], "count": len(upper)}]
     return [{"lo": s[0], "hi": s[-1], "count": len(s)}]
@@ -193,10 +217,13 @@ def _area_stats(peers, regimes, radius):
 def _analyze(well, peers, radius):
     depths = [_num(p.get("depth_total")) for p in peers]
     depths = [d for d in depths if d]
-    # Producing zones are a LOCAL structure. Across 80+ wells spanning a whole
-    # valley the shallow/deep separation washes out into a continuum, so detect
-    # regimes on the nearest neighbours only (peers arrive distance-sorted).
-    local = [d for d in (_num(p.get("depth_total")) for p in peers[:REGIME_SAMPLE]) if d]
+    # Producing zones are a LOCAL structure. Across a whole valley the
+    # shallow/deep separation washes out into a continuum, so prefer the tight
+    # ring around the well and only widen when that ring is too sparse to judge.
+    # (Peers arrive distance-sorted.)
+    tight = [p for p in peers if (p.get("distance_miles") or 99) <= REGIME_RADIUS]
+    sample = tight if len(tight) >= REGIME_MIN_SAMPLE else peers[:REGIME_SAMPLE]
+    local = [d for d in (_num(p.get("depth_total")) for p in sample) if d]
     regimes = _regimes(local)
     stats = _area_stats(peers, regimes, radius)
     peer_median = stats["depth"]["median"]
@@ -226,8 +253,16 @@ def _analyze(well, peers, radius):
                 and (_num(p.get("depth_total")) or 0) <= my_regime["hi"]]
     else:
         same = peers
-    regime_statics = [_num(p.get("static_water_level")) for p in same]
-    regime_statics = [s for s in regime_statics if s]
+    # Restrict further to wells of COMPARABLE DEPTH. Static water level rises
+    # with well depth, so judging a 530 ft well against the statics of 520-700 ft
+    # wells is circular - the deeper cohort always reports a deeper water level,
+    # which made every deep well look like its screen sat above water.
+    band = [p for p in same
+            if depth and _num(p.get("depth_total"))
+            and DEPTH_BAND_LO * depth <= _num(p.get("depth_total")) <= DEPTH_BAND_HI * depth]
+    regime_statics = [s for s in (_num(p.get("static_water_level")) for p in band) if s]
+    if len(regime_statics) < MIN_STATIC_READINGS:
+        regime_statics = []          # too thin to claim anything
     static_median = _median(regime_statics)
     # Positive = screen bottom sits below the water table (submerged, good).
     margin = round(bot - static_median, 1) if (bot and static_median) else None
@@ -253,8 +288,11 @@ def _analyze(well, peers, radius):
     # Screening to the bottom of the hole is normal practice, so zero reserve is
     # only a warning when the well is ALSO near the water table or shallow for the
     # area. A 530 ft well screened 430-530 with 350 ft of head above it is fine.
-    reserve_matters = (margin is None or margin < 50) or (percentile is not None
-                                                          and percentile <= 50)
+    # Note "margin is None" does NOT make reserve matter: with no water-table
+    # reading the only evidence left is relative depth, and a well in the deepest
+    # quartile of its area is not at risk merely for being screened to bottom.
+    reserve_matters = ((margin is not None and margin < 50)
+                       or (percentile is not None and percentile <= 40))
     if reserve is not None and reserve_matters:
         if reserve <= 0:
             points += 2
